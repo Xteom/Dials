@@ -192,6 +192,39 @@ buried — so they are values of the same knob:
 `PropertyNotify` on the root window for `_NET_ACTIVE_WINDOW`. `above` and `normal` need no watching
 at all — the WM does the work.
 
+### Overlapping Dials
+
+Dials are **not** mutually exclusive and there is no "only one Dial at a time" rule. Two Dials
+whose rects overlap are resolved entirely by each Dial's own `on_focus_loss`, because showing a
+Dial is an ordinary focus change and is treated exactly like clicking on any other window:
+
+| Dial A is showing, then Dial B is shown over it | What happens to A |
+| --- | --- |
+| A is `hide` | A hides — same as clicking away from it |
+| A is `normal` | A stays visible and gets buried under B |
+| A is `above` | A stays visible; B is stacked above it only if B is also `above` |
+
+This falls out of the mechanism already described rather than needing new code: B taking focus
+changes `_NET_ACTIVE_WINDOW`, the daemon's existing watcher sees it, and A's configured behavior
+applies. Nothing special-cases "another Dial" versus "any other window", which is the point — the
+keypad becomes a set of independent windows, not a mode switcher.
+
+The default layout deliberately avoids the question anyway: Spotify on the left half of `HDMI-0`
+and the Firefox panel on the right half do not overlap, so both can be shown at once.
+
+**Race to guard against.** A Dial must never hide itself during its own show sequence. Showing a
+Dial writes geometry and hints and *then* activates it, and focus can move transiently in between.
+The rule is therefore: a `hide` Dial hides only on a transition from *it held focus* to *it does
+not* — never on a focus event for a window that had not yet gained focus. Without that guard, a
+`hide` Dial could hide itself the instant it appeared. The condition is a property of the watcher's
+state, so it is unit-testable without X.
+
+Two consequences of applying the rule uniformly, stated so they are not read as bugs:
+
+- The `dials-confirm` dialog takes focus, so raising it hides any showing `hide` Dial. That is the
+  same thing clicking on the dialog would do, and it is left consistent rather than special-cased.
+- The launch-confirmation notification does **not** take focus, so it never disturbs a showing Dial.
+
 `_NET_WM_STATE_STICKY`, `SKIP_TASKBAR` and `SKIP_PAGER` are applied to every Dial unconditionally:
 Dials must be reachable from any workspace and must never appear in alt-tab.
 
@@ -567,7 +600,7 @@ pytest, with ops injected so no X server is required — mirroring `clip`'s
 | --- | --- |
 | `geometry.py` | fractions → pixels; the full monitor fallback chain (named → primary → first → root box); clamping negative offsets, oversized rects, and off-screen monitors; workarea intersection including the no-inset case |
 | `monitors.py` | parsing a RandR reply into monitors; skipping `crtc == 0` outputs; no output flagged primary; zero usable monitors; cache invalidation on a simulated `RRScreenChangeNotify`; a query that raises |
-| `panels.py` | the state machine table, every state → action pair |
+| `panels.py` | the state machine table, every state → action pair; the focus-loss watcher — a `hide` Dial hides when another Dial (or any window) takes focus, a `normal` one is left buried, an `above` one left alone; and the held-focus guard, so a Dial never hides itself during its own show sequence |
 | `config.py` | load/save round trip, defaults inheritance, validation, bad values, rejecting fractions outside 0..1 and zero-size rects, reserved-slot rejection |
 | `keys.py` | slot ↔ keycode mapping both directions, reserved-slot handling |
 | `icons.py` | `.desktop` → glyph mapping, override precedence |
