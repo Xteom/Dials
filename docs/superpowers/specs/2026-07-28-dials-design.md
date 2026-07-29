@@ -33,12 +33,33 @@ keycode  81 = KP_Prior KP_9      # NumLock off -> KP_Prior, on -> KP_9
 mod2        Num_Lock (0x4d)
 ```
 
-A passive `XGrabKey` on a keycode with an **empty modifier mask** therefore matches only when no
-modifiers are active — including no `mod2`. NumLock-on presses never match the grab and are
-delivered to the focused application as normal digits.
+X11 passive grabs match the modifier state **exactly**: the specified modifiers must be down and no
+others may be. So a grab on a keycode with an empty mask fires only while no modifier at all is
+active — including no `mod2`. NumLock-on presses never match the grab and are delivered to the
+focused application as normal digits.
+
+Exact matching cuts both ways, and this is where the naive version of the design is **wrong**: any
+*other* lock modifier also breaks the match. CapsLock sets `LockMask` (`0x02`), so with CapsLock on
+a mask-0-only grab stops matching and every Dial silently dies — no error, no log, just a dead
+keypad until you notice CapsLock is on. Probe `07` confirms exactly that.
+
+The grab set is therefore the **cross product of the tolerated lock modifiers**, which must never
+include `Mod2Mask`:
+
+```
+for each keycode:  grab(mask = 0)          # nothing held
+                   grab(mask = LockMask)    # CapsLock on, still a Dial
+                   #  ... never Mod2Mask -- that is the whole premise
+```
+
+The tolerated set is derived at runtime from `get_modifier_mapping()` rather than hardcoded, because
+which bit ScrollLock occupies is not fixed. On this machine `mod3` is unmapped, so ScrollLock
+contributes no modifier and the set is just `{0, LockMask}` — 2 masks × 16 keycodes = **32 grabs**.
+If ScrollLock were mapped the cross product would grow to 4 masks per key.
 
 This is the load-bearing assumption of the whole design, so it was verified empirically rather than
-assumed.
+assumed — including the CapsLock case, which an earlier draft got wrong because the first probe
+happened to run with CapsLock off.
 
 ## Verified findings
 
@@ -48,20 +69,24 @@ be re-run if GNOME, Firefox, or the monitor layout changes.
 | Claim | Result | Probe |
 | --- | --- | --- |
 | All 16 numpad keycodes grabbable with modifier mask 0 | Yes — no `BadAccess`, so mutter, pop-shell and Guake contend for none of them | `01` |
-| NumLock **off** → grab fires | Yes, delivered as `(keycode 91, state 0)` | `01` |
-| NumLock **on** → grab does not fire, digit types normally | Yes, nothing delivered | `01` |
+| All 32 grabs of the corrected set `{0, LockMask}` install cleanly | Yes, 32/32 | `08` |
+| **CapsLock breaks a mask-0-only grab** | **Yes — every Dial dies while CapsLock is on** | `07` |
+| Adding a `LockMask` grab fixes it without breaking digit typing | Yes — caught as `(91, 2)` with CapsLock on; still passes through when NumLock is also on | `07` |
+| NumLock **off** → grab fires, for **all 16 keys** | Yes, all 16 reach the grab and none reach the focused app | `08` |
+| NumLock **on** → **all 16 keys reach the application** as their digit | Yes — every key delivered to a real focused window with `Mod2` set and the correct `KP_*` keysym (`0xffb9` = `KP_9`, …) | `08` |
 | `firefox --class=NAME` sets WM_CLASS on Firefox 152 | Yes → `WM_CLASS = "firefox", "FFPanelProbe"`; the **class** (second) field carries the custom value | `02` |
-| Geometry can be forced on a foreign window | Yes, pixel-exact via `configure()` | `02`, `04` |
-| mutter honours `_NET_WM_STATE_ABOVE`, `STICKY`, `SKIP_TASKBAR`, `SKIP_PAGER` | Yes, all four, with source indication 1 or 2 | `03` |
+| mutter honours `_NET_WM_STATE_ABOVE`, `STICKY`, `SKIP_TASKBAR`, `SKIP_PAGER` | Yes, all four, with source indication 1 or 2 — the property is set; the resulting *shell behaviors* (alt-tab exclusion, stacking) are inferred from the mutter source cited below, not observed | `03` |
 | Dial hints survive a minimize/restore round trip | Yes, 4/4 | `03` |
-| `_NET_WM_STATE` reports `HIDDEN` when minimized, `FOCUSED` when focused | Yes | `03` |
+| `_NET_WM_STATE` reports `HIDDEN` when minimized | Yes | `03` |
+| `_NET_WM_STATE_FOCUSED` is exclusive on mutter (parent + transient) | Yes in this test — the parent *lost* `FOCUSED` when its transient became active. **Not relied upon**: EWMH permits the WM to set it on several windows, so `_NET_ACTIVE_WINDOW` is used instead | `08` |
+| Geometry accepted on a foreign window | Exact for the window types tested (GTK app, Firefox). **Not** a general guarantee — see *Geometry limits* | `02`, `04` |
 | Hide/show without `xdotool` | Yes — `WM_CHANGE_STATE`→`IconicState` and `_NET_ACTIVE_WINDOW` | `04` |
 | Desktop notifications without a new apt package | Yes — `gdbus` → `org.freedesktop.Notifications` | `04` |
-| Anything on this system reserves screen space | **No** — `_NET_WORKAREA` equals the full root box, all insets zero | `05` |
+| Anything on this system reserves screen space | No managed window sets `_NET_WM_STRUT`/`_STRUT_PARTIAL`, and `_NET_WORKAREA` equals the full root box with zero insets. Shell chrome (top bar) is not a managed window and is not covered by this | `05` |
 | NumLock state readable | Yes — `get_keyboard_control().led_mask & 0x2`, agrees with `xset` | `05` |
 | python-xlib exposes XKB (for event-driven NumLock) | **No** — server has `XKEYBOARD`, the binding does not | `05` |
 | Monitors enumerable in pure python-xlib | Yes, via the RandR **1.2** path; `get_monitors` (1.5) is absent from the binding | `06` |
-| Monitor hotplug observable without polling | Yes — `randr.select_input(RRScreenChangeNotifyMask …)` succeeds | `06` |
+| Monitor hotplug **subscription** accepted | Yes — `randr.select_input(RRScreenChangeNotifyMask …)` succeeds. This proves the mask registers, **not** that events are received and decoded; a live hotplug test is an implementation task | `06` |
 | Cost of one NumLock read | 28.4 µs; a 1 Hz poll is 0.0028 % of one core | `06` |
 
 Two facts established from source rather than by probe:
@@ -164,13 +189,90 @@ KeyPress(keycode, state == 0)
 | Window state | Action | Geometry re-applied |
 | --- | --- | --- |
 | not found | confirm-then-launch | — |
-| `_NET_WM_STATE_HIDDEN` | apply geometry + hints, activate | yes |
-| visible, no `_NET_WM_STATE_FOCUSED` | activate only | only if `pin_geometry` |
-| visible and `_NET_WM_STATE_FOCUSED` | iconify | — |
+| `_NET_WM_STATE_HIDDEN` (minimized) | apply geometry + hints, activate | yes |
+| visible, **not the active window** | activate only | only if `pin_geometry` |
+| visible and **is the active window** | iconify | — |
 
 Three states rather than a strict two-state toggle, because a Dial with `on_focus_loss = "normal"`
 can be buried: pressing its key while it is buried must raise it, not hide it. A strict toggle would
 need two presses to surface a buried window.
+
+**"Focused" means `_NET_ACTIVE_WINDOW`, not `_NET_WM_STATE_FOCUSED`.** EWMH defines
+`_NET_WM_STATE_FOCUSED` as *"whether the window's decorations are drawn in an active state"* and
+explicitly permits a window manager to set it on more than one window — a modal dialog and its
+parent, for instance. It is a decoration hint, not an exclusive keyboard-focus flag, so it is the
+wrong predicate for a toggle: a Dial whose own dialog is up could be read as focused and get hidden
+out from under that dialog. `_NET_ACTIVE_WINDOW` is single-valued by definition and is used instead.
+
+Probe `08` tested this on mutter with a real `WM_TRANSIENT_FOR` child and found `FOCUSED` *was*
+exclusive here — the parent lost it when the child activated. So the concrete failure does not
+reproduce on this WM today. The stricter predicate is still used, because it is free, it is correct
+by specification rather than by observed behavior, and it does not depend on a mutter implementation
+detail that EWMH does not oblige it to keep.
+
+`_NET_WM_STATE_HIDDEN` remains the right test for "minimized" and is kept.
+
+### Activation is a request, not a command
+
+Sending `_NET_ACTIVE_WINDOW` asks the WM to activate a window; it can be refused, notably by
+focus-stealing prevention. The design therefore:
+
+- Sends the triggering **`KeyPress.time`** as the message timestamp, not `CurrentTime`. The daemon
+  has a real user-activity timestamp in hand and EWMH asks for it; `CurrentTime` is what a client
+  sends when it has nothing better, and it is likelier to be second-guessed. Probe `04` used
+  `CurrentTime` and succeeded, which is weaker evidence than it looks.
+- Uses **source indication 2** (pager). Dials acts on the user's behalf across other applications'
+  windows, which is pager-like rather than app-like. This is now a stated choice rather than an
+  accident of the probe.
+- **Verifies the outcome** instead of assuming it. A window can be de-iconified yet not receive
+  focus. Activation is confirmed by observing `_NET_ACTIVE_WINDOW` actually become the Dial window;
+  if it does not within a short window, the Dial is left visible and the failure is logged rather
+  than leaving the state machine believing something untrue.
+
+### Asynchronous transition model
+
+Because activation is asynchronous and refusable, a `hide` Dial needs an explicit state machine
+rather than a single guard clause:
+
+```
+INACTIVE  --key-->  ACTIVATING  --observed active-->  ACTIVE
+   ^                    |                               |
+   |                    +--- refused / timed out -------+
+   |                         (log, stay visible)        |
+   +---------------- HIDING <--- lost active -----------+
+```
+
+The hide-on-focus-loss guard arms only on the `ACTIVATING → ACTIVE` edge — that is, only after
+`_NET_ACTIVE_WINDOW` has actually been observed to equal the Dial's window. Arming merely because an
+activation message was *sent* is not enough, and is the race an earlier draft's "held focus" wording
+under-specified.
+
+Focus events are **reconciled against current root state** rather than treated as an ordered stream:
+on each `PropertyNotify` the daemon re-reads `_NET_ACTIVE_WINDOW` and compares, so a stale or
+coalesced event cannot drive a wrong transition.
+
+Races this model must absorb, each a test case:
+
+| Race | Required behavior |
+| --- | --- |
+| Activation refused or times out | log, leave the Dial visible, return to `INACTIVE` |
+| Window destroyed between find and act | swallow the X error, return to `INACTIVE` |
+| Focus moves elsewhere before activation completes | do not hide; the guard never armed |
+| Two Dial keys pressed in rapid succession | each Dial keeps independent state; the second activation supersedes |
+| Focus moves to a transient owned by the Dial | treated as the Dial still being active, not as focus loss |
+| Iconifying emits further focus/property events | reconciliation against root state makes them harmless |
+| Config reload changes or removes a Dial mid-transition | in-flight transition is abandoned, not applied to the new Dial |
+
+### Key autorepeat
+
+Holding a Dial key down produces repeated `KeyPress` events, which would toggle a Dial show → hide →
+show for as long as the key is held. The daemon therefore **ignores repeats**: a press of the same
+keycode within a short debounce window of the previous one is discarded. Debouncing at the dispatch
+layer also protects assign mode and launch confirmation from the same problem.
+
+This is the one behavior in the design that no probe covers, because XTEST cannot faithfully
+reproduce server-generated autorepeat — it needs a physically held key, so it is an explicit
+first-run smoke test rather than a claim.
 
 Geometry is **not** re-applied on a plain raise, so hand-nudging a window is not undone on every
 keypress. `dials capture <slot>` saves the current position instead; `pin_geometry = true` opts a
@@ -212,12 +314,11 @@ keypad becomes a set of independent windows, not a mode switcher.
 The default layout deliberately avoids the question anyway: Spotify on the left half of `HDMI-0`
 and the Firefox panel on the right half do not overlap, so both can be shown at once.
 
-**Race to guard against.** A Dial must never hide itself during its own show sequence. Showing a
-Dial writes geometry and hints and *then* activates it, and focus can move transiently in between.
-The rule is therefore: a `hide` Dial hides only on a transition from *it held focus* to *it does
-not* — never on a focus event for a window that had not yet gained focus. Without that guard, a
-`hide` Dial could hide itself the instant it appeared. The condition is a property of the watcher's
-state, so it is unit-testable without X.
+**Race to guard against.** A Dial must never hide itself during its own show sequence. Showing a Dial
+writes geometry and hints and *then* activates it, and focus can move transiently in between. This is
+handled by the `ACTIVATING → ACTIVE` edge of the transition model above: the hide guard arms only
+once `_NET_ACTIVE_WINDOW` has been *observed* to equal the Dial's window, never merely because an
+activation request was sent. The condition is watcher state, so it is unit-testable without X.
 
 Two consequences of applying the rule uniformly, stated so they are not read as bugs:
 
@@ -254,6 +355,12 @@ Layout as of probe `06`:
 Pure python-xlib, RandR **1.2** API — `get_screen_resources` → `get_output_info` → `get_crtc_info`,
 plus `get_output_primary`. The 1.5 `get_monitors` call is *not* available in python-xlib 0.29 (probe
 `06`), so it is not used. Outputs with `crtc == 0` are skipped as disconnected.
+
+**RandR 1.2 enumerates outputs, not logical monitors**, which matters: mirrored outputs share one
+CRTC and would otherwise appear as two "monitors" with identical rects. Results are therefore
+**deduplicated by CRTC id**, keeping the first output name for each CRTC, and the surviving list is
+**sorted deterministically** by `(x, y, name)` so that "first usable monitor" in the fallback chain
+means the same thing on every run rather than depending on server reply order.
 
 ### Cache and invalidation
 
@@ -295,10 +402,20 @@ Nothing on this system reserves screen space, so there is **no strut subtraction
 zero windows with `_NET_WM_STRUT` / `_NET_WM_STRUT_PARTIAL`, and `_NET_WORKAREA` is
 `[0, 0, 3440, 2880]` — identical to the root bounding box, all four insets zero.
 
-`geometry.py` still intersects the monitor rect with `_NET_WORKAREA` rather than hardcoding "no
-insets": it is the same amount of code, it is correct by construction, and it starts working
-automatically if a reserved-space panel is ever added. Today the intersection is a no-op. An earlier
-draft of this spec had a per-Dial `ignore_struts` escape hatch; it was removed as configuration
+**An earlier draft intersected each monitor rect with `_NET_WORKAREA`, which is wrong**, and is
+removed. `_NET_WORKAREA` is a single desktop-wide rectangle; it cannot express per-monitor reserved
+regions. On a multi-monitor desktop, one panel reserving an edge shrinks that one rectangle, and
+intersecting *every* monitor against it would wrongly shrink monitors the panel never touched. The
+previous justification — "it is free and starts working automatically" — was wrong: it was not free,
+it was latently incorrect, and only invisible because every inset is currently zero.
+
+`geometry.py` therefore resolves against the **raw deduplicated monitor rect**. If reserved space
+ever appears, the correct implementation is to aggregate `_NET_WM_STRUT_PARTIAL` from strut-setting
+windows and subtract only the struts that actually intersect the monitor in question — not to consult
+the desktop-wide workarea. That is written down as the known upgrade path rather than pre-built,
+since nothing on this system reserves space today.
+
+An earlier draft also had a per-Dial `ignore_struts` escape hatch; it was removed as configuration
 surface for a problem that does not exist here.
 
 The practical consequence: a Dial on `eDP-1-1` with `y = 0.0` sits under the GNOME top bar, because
@@ -390,7 +507,8 @@ pin_geometry  = false
 [dials."9"]
 label         = "Spotify"
 match_class   = "spotify"             # WM_CLASS *class* field (second field)
-launch        = "/snap/bin/spotify"
+# must carry the scale flag, or the min-width workaround from spotify_width is lost
+launch        = "/snap/bin/spotify --force-device-scale-factor=0.7"
 icon          = ""                   # nerd font glyph; auto-guessed from .desktop if omitted
 monitor       = "HDMI-0"
 rect          = [0.0, 0.0, 0.5, 1.0]
@@ -409,13 +527,63 @@ Both Spotify and the Firefox panel live on `HDMI-0`, the ultrawide — Spotify o
 Firefox on the right half, so they can be shown together without overlapping. The portrait monitor
 is deliberately not referenced by any default, since it is currently disconnected.
 
-`rect` fractions resolve against the monitor rect intersected with `_NET_WORKAREA` (today a no-op;
-see *Screen space* above).
+`rect` fractions resolve against the raw deduplicated monitor rect (see *Screen space* above).
+
+### Geometry limits
+
+"Geometry is applied exactly" holds for the window types probed — a GTK app and Firefox both landed
+on the requested rect with zero drift — but it is **not** a general guarantee, and the spec should not
+be read as promising one. A `ConfigureRequest` is subject to the application's own size hints:
+minimum sizes, maximum sizes, and resize increments. A terminal that resizes in character cells will
+land on the nearest cell boundary rather than the exact pixel rect.
+
+The concrete known case on this machine is **Spotify**, which enforces a minimum window width; the
+sibling `spotify_width` project exists precisely because of it and works around it with
+`--force-device-scale-factor=0.7`. A narrow Dial rect for Spotify may therefore come out wider than
+requested. That launcher override is already in place, so the two projects have to stay consistent:
+Spotify's Dial `launch` should go through the same `.desktop` override rather than bare
+`/snap/bin/spotify`, or the minimum width will not be reduced.
+
+Behavior when a window refuses the requested size: accept what the WM grants, log the discrepancy
+once, and do not fight it in a loop. `dials status` reports Dials whose last applied geometry did not
+match what was asked for.
 
 ## Window identification
 
 Match on the **class** field of `WM_CLASS`. For most apps that is enough: Spotify's Snap sets
 `StartupWMClass=spotify` (see the sibling `spotify_width` project).
+
+### Which window wins
+
+A class match can return several windows — two Slack windows, a browser with three windows, an app
+plus its open dialog. Every branch of the state machine depends on picking one deterministically, so
+the policy is explicit rather than left to whatever `_NET_CLIENT_LIST` order happens to be:
+
+1. Consider only windows in `_NET_CLIENT_LIST` (WM-managed) whose `WM_CLASS` class field matches.
+2. Exclude windows whose `_NET_WM_WINDOW_TYPE` is `DIALOG`, `UTILITY`, `SPLASH`, `MENU` or
+   `TOOLTIP`, and exclude override-redirect windows. A dialog is never *the* Dial.
+3. Among the rest, prefer the one that is currently `_NET_ACTIVE_WINDOW`.
+4. Otherwise prefer the most recently active — tracked by the daemon as it watches
+   `_NET_ACTIVE_WINDOW` anyway, so this costs nothing.
+5. Otherwise fall back to the lowest window id, purely so the choice is stable across presses rather
+   than arbitrary.
+
+A **transient owned by the chosen window** (`WM_TRANSIENT_FOR` pointing at it) counts as part of that
+Dial's group: if the transient is active, the Dial is considered active, and it is not treated as
+focus loss. This is what keeps a Dial from hiding itself while its own dialog is open — the concern
+that motivated dropping `_NET_WM_STATE_FOCUSED`.
+
+Two further identity rules:
+
+- **Window ids are never persisted.** They are resolved fresh on each press, because an id can be
+  destroyed and reused. Only the class lives in config.
+- **After a launch**, the waiter accepts a matching window only if it appeared *after* the launch was
+  issued, so an older pre-existing window of the same class is not mistaken for the newly spawned
+  one.
+
+Where a class is genuinely ambiguous and the above is not enough, the intended answer is a dedicated
+instance with its own class — exactly the Firefox approach below — rather than more elaborate
+matching heuristics.
 
 Firefox needs more care, because Firefox refuses to run two instances against one profile, so a
 "panel" Firefox window cannot simply be a second window of the normal browser. Options weighed:
@@ -487,24 +655,72 @@ conflict with. The dialog is keyboard-driven but its buttons are clickable.
 If the dialog cannot start (no GTK, no display), assign mode **refuses** the overwrite with a
 notification rather than silently destroying the existing Dial.
 
+### Capture and dispatch semantics
+
+| Question | Answer |
+| --- | --- |
+| When is the target window captured? | At the moment `.` is pressed — window id, class and geometry are **snapshotted** then. Whatever gains focus afterwards is irrelevant, so the dialog itself taking focus cannot change what gets bound |
+| Does a numpad press go to assign mode or run its Dial? | Assign mode takes precedence while armed. One dispatcher decides per press, so there is no grab juggling and no race |
+| What if the captured window closes before confirmation? | abort with a notification; a Dial is never written from a dead window's snapshot |
+| Does the 5 s timeout kill the dialog? | **No.** The timeout bounds only the *capture* phase — waiting for a slot key. Once a slot is chosen, capture is complete and the modal has its own lifetime; a confirmation dialog that vanished after 5 s would be unusable |
+| `WM_CLASS` or `_NET_WM_NAME` missing or malformed | refuse to bind and say why. A Dial with an empty `match_class` would match unpredictably, so it is never written |
+| Captured class matches several windows | allowed — the *Which window wins* policy resolves it at press time. The snapshot records the class, not the id |
+| Concurrent edits from the CLI or TUI | config writes are **atomic**: write a temp file in the same directory, `fsync`, then `rename`. A writer re-reads and re-applies onto the current file rather than overwriting from a stale copy, so a TUI session open in another terminal cannot silently revert a Dial |
+| After a successful write | the daemon reloads its own config in-process; no `SIGHUP` round trip and no window where the file and the running state disagree |
+
 ## Launch confirmation
 
 An unbound-but-configured app is not launched on the first press, so a stray keypress never spawns
 anything. Instead: notify *"Spotify not running — press Enter to launch"* and arm for 5 s. Either
 main `Return` (keycode 36) or `KP_Enter` confirms.
 
-While armed, `Return` and `KP_Enter` are grabbed with **mask 0 only**, and ungrabbed immediately on
-the first press or at timeout. So plain Enter is intercepted only inside that short window, and only
-unmodified — `Shift+Enter` and `Ctrl+Enter` are never touched. `Return` must be `BadAccess`-checked
-at grab time like every other key, since it is more likely to be contended than the numpad keys; if
-the grab fails, fall back to `KP_Enter` alone and log it.
+While armed, `Return` and `KP_Enter` are grabbed over the **same tolerated lock-mask set as the Dial
+keys** — `{0, LockMask}` — and ungrabbed immediately on the first press or at timeout. Using mask 0
+alone here would reintroduce the probe `07` bug in miniature: confirmation would silently stop working
+whenever CapsLock happened to be on. Modified Enter is still never touched, since `Mod2Mask`,
+`ControlMask` and `ShiftMask` are excluded, so `Shift+Enter` and `Ctrl+Enter` pass through untouched.
+
+`Return` must be `BadAccess`-checked at grab time like every other key, since it is far more likely to
+be contended than the numpad keys. See *Confirmation edge cases* below for what happens when one or
+both grabs fail.
 
 If `enter` is itself bound to a Dial, that binding is suspended for the duration of the confirm
 window. This is documented rather than designed around, because reserving Enter permanently would
 waste one of only 15 slots.
 
-After confirmation: run `launch`, wait up to 10 s for a window matching `match_class`, then apply
-geometry and hints and activate it. If no window appears, notify and give up.
+After confirmation: run `launch`, wait up to 10 s for a window matching `match_class` **that appeared
+after the launch was issued**, then apply geometry and hints and activate it. If no window appears,
+notify and give up. The process is **not** killed — a slow-starting app that shows a window at 11 s is
+a much better outcome than a killed one, and killing a process because it was merely slow is the more
+dangerous behavior.
+
+The waiter runs off the daemon's existing X event loop (arm a deadline, check on `MapNotify` and on
+`_NET_CLIENT_LIST` changes) and **never blocks it**. A blocking 10 s wait would freeze every other
+Dial.
+
+### Confirmation edge cases
+
+These were undefined in an earlier draft and are now specified, because a temporary global grab of
+`Return` is the most intrusive thing in the design and its failure modes must be closed:
+
+| Case | Behavior |
+| --- | --- |
+| Either `Return` or `KP_Enter` grab fails | arm with whichever succeeded; if **both** fail, refuse to arm and notify — never leave a confirmation pending with no way to confirm it |
+| One grab succeeds, the other fails | roll back to a consistent state: keep the successful grab, report the other in `status` |
+| A second missing-app Dial is pressed while armed | the newer request **replaces** the older one; there is only ever one pending confirmation, so Enter is never ambiguous |
+| The originating Dial key is pressed again while armed | treated as confirmation, so the "press it twice" instinct also works |
+| Daemon exits, is paused, or reloads while armed | both temporary grabs are released in a `finally`-equivalent path; grabs are process-scoped so a *crash* releases them with the X connection, but an orderly stop must not rely on that |
+| Autorepeat from the initiating key | swallowed by the dispatch debounce, so holding a key cannot arm and confirm in one gesture |
+| `enter` is bound to a Dial | that Dial is suspended for the confirm window by the **single dispatcher**, which decides per press whether Enter means "confirm" or "run the Dial" — not by ungrabbing and regrabbing, which would race |
+
+**A note on this being the intrusive option.** Grabbing plain `Return` for 5 s can swallow an Enter
+you meant for a terminal or a chat box, and because the notification deliberately does *not* take
+focus, you may not realise a confirmation is pending — so an Enter pressed for an unrelated reason can
+launch the app. That is a new accidental-launch path, which is mildly at odds with the reason
+confirmation was wanted in the first place. Confirming with the **same Dial key again** avoids
+grabbing `Return` at all and unambiguously identifies which pending launch is being confirmed. Enter
+is implemented as specified because it was explicitly requested; the trade-off is recorded here so it
+can be revisited after living with it.
 
 ## Interfaces
 
@@ -599,10 +815,13 @@ pytest, with ops injected so no X server is required — mirroring `clip`'s
 | Area | What is covered |
 | --- | --- |
 | `geometry.py` | fractions → pixels; the full monitor fallback chain (named → primary → first → root box); clamping negative offsets, oversized rects, and off-screen monitors; workarea intersection including the no-inset case |
-| `monitors.py` | parsing a RandR reply into monitors; skipping `crtc == 0` outputs; no output flagged primary; zero usable monitors; cache invalidation on a simulated `RRScreenChangeNotify`; a query that raises |
+| `monitors.py` | parsing a RandR reply into monitors; skipping `crtc == 0` outputs; **deduplicating mirrored outputs sharing one CRTC**; deterministic ordering; no output flagged primary; zero usable monitors; cache invalidation on a simulated `RRScreenChangeNotify`; a query that raises |
+| `panels.py` transitions | the `INACTIVE → ACTIVATING → ACTIVE → HIDING` model against every race in the table above: refused activation, window destroyed mid-flight, focus moving before activation completes, two Dials in rapid succession, transient-of-Dial gaining focus, stale/coalesced focus events reconciled against root state, config reload mid-transition |
 | `panels.py` | the state machine table, every state → action pair; the focus-loss watcher — a `hide` Dial hides when another Dial (or any window) takes focus, a `normal` one is left buried, an `above` one left alone; and the held-focus guard, so a Dial never hides itself during its own show sequence |
 | `config.py` | load/save round trip, defaults inheritance, validation, bad values, rejecting fractions outside 0..1 and zero-size rects, reserved-slot rejection |
 | `keys.py` | slot ↔ keycode mapping both directions, reserved-slot handling |
+| `grab.py` | the tolerated-lock-mask cross product built from a fake modifier mapping — includes `LockMask`, **never** `Mod2Mask`, and grows correctly when ScrollLock is mapped; partial-failure rollback; autorepeat debounce |
+| `windows.py` | the *which window wins* policy: type/override-redirect exclusion, active-window preference, most-recent tiebreak, lowest-id stability, transient-of-match treated as the same group, post-launch windows only |
 | `icons.py` | `.desktop` → glyph mapping, override precedence |
 | `assign.py` | arming, timeout, cancel, write-back, **occupied-slot path returns a confirmation request rather than writing**, and the refuse-on-dialog-failure path |
 | `launcher.py` | confirm arming/timeout, wait-for-window with a fake clock |
