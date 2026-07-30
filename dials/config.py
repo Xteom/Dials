@@ -129,6 +129,22 @@ def _str(value, field: str, where: str) -> str:
     return value
 
 
+def _table(value, key: str, correct: str) -> dict:
+    """Every ConfigError has to be a ConfigError, not an AttributeError.
+
+    `dials = 5`, `[dials]` + `"9" = 5`, and `defaults = "x"` all used to reach
+    `.get()` on a non-dict and escape as AttributeError. `dials status` catches
+    only ConfigError, so the one command whose job is reporting config health
+    produced a traceback on exactly the input it exists to diagnose.
+    """
+    if not isinstance(value, dict):
+        raise ConfigError(
+            f"{key} must be a table, not {type(value).__name__} "
+            f"({value!r}); write it as {correct}"
+        )
+    return value
+
+
 def _defaults(raw: dict) -> Defaults:
     base = Defaults()
     return replace(
@@ -199,10 +215,16 @@ def loads(text: str) -> Config:
         raw = _toml.loads(text)
     except Exception as exc:
         raise ConfigError(f"malformed TOML: {exc}") from None
-    defaults = _defaults(raw.get("defaults", {}))
+    # No `or {}` on either: an absent key legitimately means "empty", but a
+    # PRESENT falsy value (dials = 0, defaults = "") is malformed and must say
+    # so rather than be silently treated as absent.
+    defaults = _defaults(_table(raw.get("defaults", {}), "defaults",
+                                "[defaults]"))
+    dials_raw = _table(raw.get("dials", {}), "dials", '[dials."9"]')
     dials = {
-        slot: _dial(slot, body, defaults)
-        for slot, body in (raw.get("dials", {}) or {}).items()
+        slot: _dial(slot, _table(body, f"dials.{slot!r}", f'[dials."{slot}"]'),
+                    defaults)
+        for slot, body in dials_raw.items()
     }
     return Config(defaults=defaults, dials=dials)
 

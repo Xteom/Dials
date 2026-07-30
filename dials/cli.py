@@ -193,9 +193,22 @@ def _cmd_capture(args, d: Deps) -> int:
     return 0
 
 
+#: Printed whenever the flag was written but no daemon could be signalled. The
+#: flag persists, so a daemon started later picks it up - but a daemon running
+#: RIGHT NOW still holds all 32 grabs, and pause is the safety valve for a game
+#: or a remote-desktop session. Claiming success there is the one lie this
+#: command must never tell.
+_UNSIGNALLED = ("could not signal a running dialsd - the flag is written (a "
+                "daemon started later will honour it), but any daemon running "
+                "now has NOT changed state")
+
+
 def _cmd_pause(args, d: Deps) -> int:
     d.pause_set(True)
-    d.signal_daemon()
+    if not d.signal_daemon():
+        print(f"pause flag set, but {_UNSIGNALLED}; a running daemon still "
+              f"holds every grab", file=d.out)
+        return 1
     print("paused - the numpad now behaves normally in both NumLock states",
           file=d.out)
     return 0
@@ -203,7 +216,10 @@ def _cmd_pause(args, d: Deps) -> int:
 
 def _cmd_resume(args, d: Deps) -> int:
     d.pause_set(False)
-    d.signal_daemon()
+    if not d.signal_daemon():
+        print(f"pause flag cleared, but {_UNSIGNALLED}; a running daemon is "
+              f"still paused", file=d.out)
+        return 1
     print("resumed", file=d.out)
     return 0
 

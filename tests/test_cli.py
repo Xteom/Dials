@@ -163,6 +163,31 @@ def test_resume_clears_the_flag_and_signals():
     assert state["signals"] == ["HUP"]
 
 
+def test_pause_reports_failure_when_the_daemon_could_not_be_signalled():
+    """Pause is the safety valve for a game or remote-desktop session.
+
+    If the signal never lands, a running daemon still holds all 32 grabs - so
+    printing "the numpad now behaves normally" and exiting 0 would be a lie
+    about the one thing this command exists to guarantee.
+    """
+    d, state, out = deps({})
+    d.signal_daemon = lambda: False
+    assert main(["pause"], deps=d) == 1
+    assert state["paused"] is True              # the flag still persists
+    text = out.getvalue().lower()
+    assert "could not signal" in text
+    assert "behaves normally" not in text
+
+
+def test_resume_reports_failure_when_the_daemon_could_not_be_signalled():
+    d, state, out = deps({}, paused=True)
+    d.signal_daemon = lambda: False
+    assert main(["resume"], deps=d) == 1
+    assert state["paused"] is False
+    assert "could not signal" in out.getvalue().lower()
+    assert "still paused" in out.getvalue().lower()
+
+
 def test_status_reports_paused_state():
     d, _, out = deps({"9": dial()}, paused=True)
     assert main(["status"], deps=d) == 0

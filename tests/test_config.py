@@ -194,3 +194,44 @@ def test_rejects_a_boolean_match_class():
 def test_rejects_a_list_monitor():
     with pytest.raises(ConfigError, match="monitor"):
         loads('[dials."9"]\nlabel="x"\nmatch_class="x"\nmonitor=["a"]\n')
+
+
+# ---- malformed SHAPES, not just malformed values -------------------------
+#
+# All three of these used to escape as AttributeError from a `.get()` on a
+# non-dict. `dials status` catches only ConfigError, so the command whose whole
+# job is reporting config health tracebacked on exactly the input it exists to
+# diagnose - and the daemon's SIGHUP reload path relies on the same exception
+# type to keep the last-good config.
+
+def test_rejects_dials_that_is_not_a_table():
+    with pytest.raises(ConfigError, match="dials must be a table") as exc:
+        loads("dials = 5\n")
+    assert "int" in str(exc.value)
+    assert '[dials."9"]' in str(exc.value)
+
+
+def test_rejects_a_dial_body_that_is_not_a_table():
+    with pytest.raises(ConfigError, match="must be a table") as exc:
+        loads('[dials]\n"9" = 5\n')
+    assert "dials.'9'" in str(exc.value)
+    assert '[dials."9"]' in str(exc.value)
+
+
+def test_rejects_defaults_that_is_not_a_table():
+    with pytest.raises(ConfigError, match="defaults must be a table") as exc:
+        loads('defaults = "x"\n')
+    assert "str" in str(exc.value)
+    assert "[defaults]" in str(exc.value)
+
+
+def test_a_present_but_falsy_table_is_malformed_not_absent():
+    """`dials = 0` is a typo, not an empty table; only an ABSENT key is empty."""
+    with pytest.raises(ConfigError, match="dials must be a table"):
+        loads("dials = 0\n")
+
+
+def test_an_absent_or_empty_table_is_still_fine():
+    assert loads("").dials == {}
+    assert loads("[dials]\n").dials == {}
+    assert loads("[defaults]\n").defaults.monitor == "HDMI-0"
