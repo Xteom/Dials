@@ -508,7 +508,7 @@ def main() -> int:
     # diagnostic reached journald with no level and no logger name. journald
     # supplies its own timestamp, so the format deliberately does not.
     logging.basicConfig(level=logging.INFO,
-                       format="%(levelname)s %(name)s: %(message)s")
+                        format="%(levelname)s %(name)s: %(message)s")
 
     d = display.Display()
     root = d.screen().root
