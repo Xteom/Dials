@@ -75,6 +75,7 @@ def group_ids(chosen: WindowInfo, windows: list[WindowInfo]) -> set[int]:
     return ids
 
 
+import logging
 import time
 
 import Xlib.protocol.event  # noqa: F401  (populates Xlib.protocol.event, see below)
@@ -87,6 +88,8 @@ from dials.geometry import Rect
 # `Xlib.display`). We reference it below as `protocol.event.ClientMessage`, so
 # import it explicitly here to guarantee the attribute exists regardless of
 # what else has been imported.
+
+log = logging.getLogger(__name__)
 
 #: Applied to every Dial unconditionally. STICKY so a Dial is reachable from
 #: any workspace; SKIP_TASKBAR because mutter reads that same flag to exclude a
@@ -127,6 +130,9 @@ class WindowOps:
         try:
             p = self._win(wid).get_full_property(self._atom(name), X.AnyPropertyType)
         except Exception:
+            # Routine: a window can vanish between being listed and being
+            # read. Not worth surfacing above debug.
+            log.debug("failed to read %s for window %#x", name, wid, exc_info=True)
             return None
         return list(p.value) if p else None
 
@@ -144,7 +150,13 @@ class WindowOps:
             )
             self.d.flush()
         except Exception:
-            pass
+            # A write that is supposed to succeed silently failing means
+            # Dials does nothing and nobody knows why - that deserves to be
+            # visible by default.
+            log.warning(
+                "client message %s failed for window %#x", type_name, wid,
+                exc_info=True,
+            )
 
     # ---- reads -----------------------------------------------------------
 
@@ -163,6 +175,9 @@ class WindowOps:
                 wtype = self.d.get_atom_name(types[0]) if types else \
                     "_NET_WM_WINDOW_TYPE_NORMAL"
             except Exception:
+                # Routine: the window can have disappeared mid-enumeration.
+                log.debug("failed to read window %#x during list_windows", wid,
+                          exc_info=True)
                 continue
             self._first_seen.setdefault(wid, now)
             out.append(WindowInfo(
@@ -196,6 +211,8 @@ class WindowOps:
             t = self.root.translate_coords(self._win(wid), 0, 0)
             return Rect(t.x, t.y, g.width, g.height)
         except Exception:
+            # Routine: the window can have disappeared since it was listed.
+            log.debug("failed to read geometry for window %#x", wid, exc_info=True)
             return None
 
     def window_name(self, wid: int) -> str:
@@ -204,10 +221,14 @@ class WindowOps:
             try:
                 return bytes(raw).decode("utf-8", "replace")
             except Exception:
-                pass
+                # Routine: fall through to the WM_NAME fallback below.
+                log.debug("failed to decode _NET_WM_NAME for window %#x", wid,
+                          exc_info=True)
         try:
             return self._win(wid).get_wm_name() or ""
         except Exception:
+            # Routine: the window can have disappeared since it was listed.
+            log.debug("failed to read WM_NAME for window %#x", wid, exc_info=True)
             return ""
 
     # ---- writes ----------------------------------------------------------
@@ -219,7 +240,10 @@ class WindowOps:
                                      width=rect.w, height=rect.h)
             self.d.flush()
         except Exception:
-            pass
+            # A write that is supposed to succeed silently failing means
+            # Dials does nothing and nobody knows why - that deserves to be
+            # visible by default.
+            log.warning("apply_geometry failed for window %#x", wid, exc_info=True)
 
     def apply_hints(self, wid: int, above: bool) -> None:
         hints = list(PANEL_HINTS)

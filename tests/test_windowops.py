@@ -126,3 +126,32 @@ def test_state_messages_use_substructure_masks():
     o.activate(0x500001, timestamp=1)
     _, mask = d.sent[-1]
     assert mask == X.SubstructureRedirectMask | X.SubstructureNotifyMask
+
+
+def test_apply_hints_uses_add_action_and_pager_source():
+    """_NET_WM_STATE messages carry a source indication too, not just
+    _NET_ACTIVE_WINDOW - action must be "add" (1) and source must be
+    pager (2) on every hint message."""
+    o, d = ops()
+    o.apply_hints(0x500001, above=True)
+    assert d.sent
+    for ev, _ in d.sent:
+        assert ev.data[1][0] == 1
+        assert ev.data[1][3] == 2
+
+
+def test_a_failing_client_message_is_logged_and_swallowed(caplog):
+    """Silent swallowing is what hid a real AttributeError; logging must fire."""
+    o, d = ops()
+
+    def boom(event, event_mask=0, onerror=None):
+        raise RuntimeError("x server said no")
+
+    d.windows  # ensure display built
+    o.root.send_event = boom
+
+    with caplog.at_level("WARNING"):
+        o.activate(0x500001, timestamp=123)   # must NOT raise
+
+    assert any("500001" in r.getMessage() or "client message" in r.getMessage()
+               for r in caplog.records), "no diagnostic was logged"
