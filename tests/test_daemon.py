@@ -332,6 +332,40 @@ pin_geometry = true
     assert bound.pin_geometry is True
 
 
+def test_a_malformed_config_on_reload_keeps_the_last_good_one_and_notifies():
+    """SIGHUP with a broken hand-edited config must not kill the daemon.
+
+    If the ConfigError escaped, the process would exit non-zero, systemd would
+    restart it, the startup load() would raise the same error, and the default
+    5-starts-in-10s limit would leave the unit permanently `failed` - i.e. one
+    typo would take the numpad layer down until a human noticed.
+    """
+    from dials.config import ConfigError
+
+    notes = Notes()
+    d = daemon(FakeOps(windows=[win(5)]), notifier=notes)
+    before = d.config
+
+    def broken():
+        raise ConfigError("dials.'9': rect w and h must be greater than 0")
+
+    assert d.reload_from(broken) is False       # must NOT propagate
+    assert d.config is before, "the last-good config was thrown away"
+    assert notes.mentions("not reloaded")
+    assert notes.mentions("keeping the previous config")
+
+
+def test_a_good_config_on_reload_is_adopted():
+    """The other half: reload_from is still a real reload when the file parses."""
+    d = daemon(FakeOps(windows=[win(5)]))
+    new = loads("""
+[dials."9"]
+match_class = "somethingelse"
+""")
+    assert d.reload_from(lambda: new) is True
+    assert d.config is new
+
+
 def test_reload_does_not_leave_a_stale_capture_armed():
     ops = FakeOps(windows=[win(5)], active=5)
     d = daemon(ops)
@@ -526,6 +560,74 @@ def test_post_launch_activation_uses_the_confirming_keypress_timestamp():
     assert ("activate", 11, 4242) in ops.calls
     assert ("activate", 11, 0) not in ops.calls
     assert d.launcher.pending is None       # stopped waiting
+
+
+def test_a_launched_window_denied_focus_is_still_adopted():
+    """The case focus-stealing prevention makes NORMAL, not exceptional.
+
+    The launched window maps but never becomes _NET_ACTIVE_WINDOW, so
+    on_active_window_changed() is never called for it. Without the
+    _NET_CLIENT_LIST route nothing adopts it: no geometry, no hints, no
+    activation, and 10s later a notification claims it never appeared.
+    """
+    clk = FakeClock()
+    ops = FakeOps(windows=[])
+    d = daemon(ops, clock=clk)
+    d.dispatch_key(keys.keycode_for("9"), timestamp=10)
+    d.dispatch_key(keys.RETURN_KEYCODE, timestamp=4242)
+
+    ops.windows = [win(11, appeared=clk.t + 1.0)]
+    ops.active = 777                    # a FOREIGN window kept the focus
+    d.on_client_list_changed()
+
+    kinds = [c[0] for c in ops.calls]
+    assert kinds == ["geometry", "hints", "activate"]
+    assert ("activate", 11, 4242) in ops.calls
+    assert d.launcher.pending is None, "the waiter must stop waiting"
+
+
+def test_a_failed_post_launch_activation_leaves_the_launch_armed(caplog):
+    """window_found() must fire only on success.
+
+    Clearing `pending` before activating orphans the window a second way: the
+    Dial is never activated and the waiter has already forgotten it, so no
+    later event can retry inside the 10s deadline.
+    """
+    clk = FakeClock()
+    ops = FakeOps(windows=[])
+    d = daemon(ops, clock=clk)
+    d.dispatch_key(keys.keycode_for("9"), timestamp=10)
+    d.dispatch_key(keys.RETURN_KEYCODE, timestamp=20)
+
+    def boom(wid, timestamp):
+        raise RuntimeError("activation refused")
+
+    ops.activate = boom
+    ops.windows = [win(11, appeared=clk.t + 1.0)]
+
+    with caplog.at_level("WARNING"):
+        d.on_client_list_changed()      # must not raise
+
+    assert d.launcher.pending is not None, "a retry must still be possible"
+    assert any("adoption failed" in r.getMessage() for r in caplog.records)
+
+    # ...and the retry succeeds once activation works again.
+    ops.activate = lambda wid, timestamp: ops.calls.append(
+        ("activate", wid, timestamp))
+    d.on_client_list_changed()
+    assert ("activate", 11, 20) in ops.calls
+    assert d.launcher.pending is None
+
+
+def test_a_client_list_read_failure_is_swallowed():
+    """on_client_list_changed runs on every window map: it may never raise."""
+    ops = FakeOps(windows=[])
+
+    def boom():
+        raise RuntimeError("x server hiccup")
+
+    ops.list_windows = boom
+    daemon(ops).on_client_list_changed()
 
 
 def test_a_pre_existing_window_is_not_mistaken_for_the_launched_one():

@@ -104,6 +104,28 @@ class Daemon:
                                  defaults=config.defaults)
         self.launcher.cancel()
 
+    def reload_from(self, loader=load) -> bool:
+        """Re-read config, keeping the last-good one if the new file is broken.
+
+        Lives here rather than inline in `main()` so the failure path is
+        testable without an X server - the same reasoning that put
+        `dispatch_key` on this class. Returns True when a new config was
+        adopted.
+        """
+        try:
+            new_config = loader()
+        except Exception as exc:
+            # Spec: keep the last-good config and say so. A hand-edited config
+            # must never kill the daemon, and must never trip systemd's start
+            # limit into a permanently failed unit (the startup load() stays
+            # fatal - there is no last-good config to keep at that point).
+            self._notify("Dials config not reloaded",
+                         f"keeping the previous config: {exc}")
+            log.warning("config reload failed, keeping last good: %s", exc)
+            return False
+        self.reload(new_config)
+        return True
+
     def _tracker(self, dial) -> FocusTracker:
         t = self.trackers.get(dial.slot)
         if t is None or t.on_focus_loss != dial.on_focus_loss:
@@ -306,21 +328,50 @@ class Daemon:
                 except Exception:
                     pass
 
+        self._adopt_pending_launch(windows)
+
+    def on_client_list_changed(self) -> None:
+        """A window appeared or vanished.
+
+        The launch waiter must not depend on the new window winning focus:
+        under focus-stealing prevention it will not, and _NET_ACTIVE_WINDOW
+        would then never fire for it at all.
+        """
+        try:
+            windows = self.ops.list_windows()
+        except Exception:
+            log.debug("could not list windows on client-list change",
+                      exc_info=True)
+            return
+        self._adopt_pending_launch(windows)
+
+    def _adopt_pending_launch(self, windows) -> None:
+        """Adopt a window that appeared after a confirmed launch.
+
+        Idempotent: `pending` is cleared on success, so being called from more
+        than one event source is safe.
+        """
         pending = self.launcher.pending
-        if pending is not None and pending.launched_at is not None:
-            chosen = choose(windows, pending.dial.match_class,
-                            since=pending.launched_at)
-            if chosen is not None:
-                dial = pending.dial
-                self.launcher.window_found()
-                try:
-                    self.ops.apply_geometry(chosen.wid, self._rect_for(dial))
-                    self.ops.apply_hints(chosen.wid,
-                                         above=(dial.on_focus_loss == "above"))
-                    self._tracker(dial).activating(chosen.wid)
-                    self.ops.activate(chosen.wid, self._confirm_timestamp)
-                except Exception:
-                    pass
+        if pending is None or pending.launched_at is None:
+            return
+        chosen = choose(windows, pending.dial.match_class,
+                        since=pending.launched_at)
+        if chosen is None:
+            return
+        dial = pending.dial
+        try:
+            self.ops.apply_geometry(chosen.wid, self._rect_for(dial))
+            self.ops.apply_hints(chosen.wid,
+                                 above=(dial.on_focus_loss == "above"))
+            self._tracker(dial).activating(chosen.wid)
+            self.ops.activate(chosen.wid, self._confirm_timestamp)
+        except Exception:
+            # Do NOT clear `pending` here: leaving it armed lets the next event
+            # retry within the 10s deadline rather than orphaning the window.
+            log.warning("post-launch adoption failed for %#x", chosen.wid,
+                        exc_info=True)
+            return
+        self.launcher.window_found()
 
     # ---- timing ----------------------------------------------------------
 
@@ -457,6 +508,11 @@ def main() -> int:
     signal.signal(signal.SIGINT, on_stop)
 
     active_atom = d.intern_atom("_NET_ACTIVE_WINDOW")
+    # _NET_CLIENT_LIST is what drives the post-launch waiter when the new window
+    # does NOT win focus, which is the normal case under focus-stealing
+    # prevention. Both are root properties and PropertyChangeMask is already
+    # selected above, so this needs no event-mask change.
+    client_list_atom = d.intern_atom("_NET_CLIENT_LIST")
     confirm_grabs_held = False
     confirm_grabs = None          # initialised here, not inside a branch
     xfd = d.fileno()
@@ -487,7 +543,10 @@ def main() -> int:
 
             if reload_requested:
                 reload_requested = False
-                daemon.reload(load())
+                # Guards ONLY the load: a malformed hand-edited config must not
+                # kill the daemon (see Daemon.reload_from), while pause/resume
+                # must still be honoured on the same SIGHUP either way.
+                daemon.reload_from(load)
                 paused = (state_dir() / PAUSE_FLAG).exists()
                 if paused and not daemon.paused:
                     daemon.pause()
@@ -599,8 +658,11 @@ def main() -> int:
                     mons.invalidate()
                     continue
 
-                if event.type == X.PropertyNotify and event.atom == active_atom:
-                    daemon.on_active_window_changed()
+                if event.type == X.PropertyNotify:
+                    if event.atom == active_atom:
+                        daemon.on_active_window_changed()
+                    elif event.atom == client_list_atom:
+                        daemon.on_client_list_changed()
                     continue
 
                 if event.type != X.KeyPress:
