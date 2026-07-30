@@ -7,10 +7,16 @@ wakeups/s. Every timeout in the design (assign 5s, confirm 5s, launch wait 10s,
 activation 1.5s) is folded into that select() timeout via `select_timeout()`;
 there is no periodic tick and no sleep loop anywhere.
 
+Because the idle timeout is None, signals need a wakeup fd to be noticed at all:
+under PEP 475 select() is auto-retried after a handler returns, so
+InterruptedError never fires and a SIGHUP would otherwise sit unobserved until
+some unrelated X event arrived. See `main()`.
+
 Deliberately does NOT import: curses, gi/GTK, dials.configwrite, dials.tui.
 """
 from __future__ import annotations
 
+import logging
 import os
 import select
 import signal
@@ -25,7 +31,14 @@ from dials.launcher import LaunchCoordinator
 from dials.panels import FocusTracker
 from dials.windows import WindowOps, choose, group_ids
 
+log = logging.getLogger(__name__)
+
 PAUSE_FLAG = "paused"
+
+#: Consecutive "X fd readable but zero events" rounds tolerated before the
+#: connection is presumed dead. A peer-closed socket is permanently readable
+#: while yielding nothing, which would otherwise spin at 100% CPU forever.
+MAX_DEAD_READY = 200
 
 
 class Daemon:
@@ -53,6 +66,10 @@ class Daemon:
         self.recent: tuple[int, ...] = ()
         self.monitor_warnings: dict[str, str] = {}
         self._paused = False
+        # KeyPress.time of the Enter that confirmed the pending launch. EWMH
+        # wants a real user-activity timestamp for the post-launch activation,
+        # and CurrentTime (0) is explicitly ruled out by the spec.
+        self._confirm_timestamp = 0
 
     # ---- pause -----------------------------------------------------------
 
@@ -78,7 +95,13 @@ class Daemon:
         for tracker in self.trackers.values():
             tracker.forget()
         self.trackers.clear()
+        # Cancel first so a reload never leaves a stale capture armed, then
+        # rebuild: AssignMode snapshots `defaults` at construction, so keeping
+        # the old instance would bind post-reload Dials with the PRE-reload
+        # on_focus_loss / pin_geometry.
         self.assign.cancel()
+        self.assign = AssignMode(clock=self._clock, notifier=self._notify,
+                                 defaults=config.defaults)
         self.launcher.cancel()
 
     def _tracker(self, dial) -> FocusTracker:
@@ -143,6 +166,58 @@ class Daemon:
             # the daemon down mid-keypress.
             return None
 
+    def dispatch_key(self, keycode: int, timestamp: int) -> str | None:
+        """Route one grabbed KeyPress. Returns a tag for what was done.
+
+        Lives here rather than inline in `main()` so the ORDERING is testable
+        without an X server. The order is load-bearing:
+
+        * the Debouncer runs first, so holding a Dial key cannot toggle it
+          repeatedly (server autorepeat is indistinguishable from real presses);
+        * `is_confirm` runs BEFORE `slot_for`, so while a confirmation is armed
+          the Enter keys confirm the launch instead of firing their own Dial.
+          KP_Enter is both a confirm key and slot "enter", so getting this
+          backwards would silently make Enter un-confirmable.
+
+        Returns None when the press was ignored, "confirm" / "assign" / "bind"
+        for the non-Dial paths, else the action from `handle_slot`.
+        """
+        try:
+            if not self.debouncer.allow(keycode):
+                return None                   # autorepeat
+
+            if self.launcher.is_confirm(keycode):
+                self.confirm_launch(timestamp)
+                return "confirm"
+
+            slot = keys.slot_for(keycode)
+            if slot is None:
+                return None
+            if slot == keys.ASSIGN_SLOT:
+                self.arm_assign()
+                return "assign"
+            if self.assign.armed:
+                self.handle_assign_key(slot)
+                return "bind"
+            return self.handle_slot(slot, timestamp=timestamp)
+        except Exception:
+            # Degrade never crash: no keypress may take the daemon down. This
+            # is the outer net for the paths handle_slot does not already wrap
+            # (notably _persist's lazy import of the TOML writer).
+            log.warning("dispatch failed for keycode %r", keycode, exc_info=True)
+            return None
+
+    def confirm_launch(self, timestamp: int) -> bool:
+        """Confirm the pending launch, remembering the triggering timestamp.
+
+        The timestamp is kept so the post-launch activation can pass a real
+        user-activity time rather than CurrentTime. It may be up to
+        LAUNCH_WAIT_TIMEOUT stale by the time the window appears, which is
+        still strictly better than 0 under focus-stealing prevention.
+        """
+        self._confirm_timestamp = timestamp
+        return self.launcher.confirm()
+
     def handle_assign_key(self, slot: str) -> None:
         """A numpad key pressed while assign mode is armed."""
         try:
@@ -188,9 +263,14 @@ class Daemon:
             self._notify("Assign mode failed", str(exc))
 
     def _persist(self, dial) -> None:
-        """Write a Dial. Imports the writer lazily so the daemon stays lean."""
-        from dials.configwrite import upsert_dial
+        """Write a Dial. Imports the writer lazily so the daemon stays lean.
+
+        The import sits INSIDE the try: it is the one import in a keypress path,
+        so a missing/broken tomli_w must degrade to a notification rather than
+        propagate out of the event loop and kill the daemon.
+        """
         try:
+            from dials.configwrite import upsert_dial
             self.config = upsert_dial(config_path(), dial)
             self._notify("Dial bound", f"{dial.slot} -> {dial.label}")
         except Exception as exc:
@@ -238,7 +318,7 @@ class Daemon:
                     self.ops.apply_hints(chosen.wid,
                                          above=(dial.on_focus_loss == "above"))
                     self._tracker(dial).activating(chosen.wid)
-                    self.ops.activate(chosen.wid, 0)
+                    self.ops.activate(chosen.wid, self._confirm_timestamp)
                 except Exception:
                     pass
 
@@ -308,8 +388,23 @@ def _spawn_confirm_dialog(request: OverwriteRequest) -> None:
 
 # ---- process entry point -------------------------------------------------
 
+def _report_grab_failures(failures: dict[int, list[int]]) -> None:
+    """Warn about grabs that could not be installed.
+
+    Used by startup AND by the resume path: a Dial that silently fails to come
+    back after `dials resume` is exactly as broken as one that never installed
+    at all, so both must be equally visible.
+    """
+    for kc, masks in failures.items():
+        print(f"warning: could not grab keycode {kc} for masks "
+              f"{[hex(m) for m in masks]}", file=sys.stderr)
+
+
 def main() -> int:
+    import socket
+
     from Xlib import X, display
+    from Xlib.error import ConnectionClosedError
 
     d = display.Display()
     root = d.screen().root
@@ -323,28 +418,50 @@ def main() -> int:
     daemon = Daemon(config=load(), ops=ops, monitors=mons)
 
     grabs = GrabManager(d, root)
-    failures = grabs.install(keys.SLOT_KEYCODES.values())
-    for kc, masks in failures.items():
-        print(f"warning: could not grab keycode {kc} for masks "
-              f"{[hex(m) for m in masks]}", file=sys.stderr)
+    _report_grab_failures(grabs.install(keys.SLOT_KEYCODES.values()))
 
     state_dir().mkdir(parents=True, exist_ok=True)
     if (state_dir() / PAUSE_FLAG).exists():
         daemon.pause()
         grabs.remove_all()
 
+    # SIGHUP/SIGTERM must be able to break the select() block. Under PEP 475
+    # select() is auto-retried after a handler returns, so InterruptedError never
+    # fires; at idle the timeout is None by design, so without this the process
+    # would stay blocked indefinitely after a signal (measured: 3.01s block while
+    # the handler had already run at 0.4s). A wakeup fd turns a signal into
+    # readable bytes that select() can see.
+    #
+    # This is also what makes `dials pause` safe: the reload check sits at the
+    # top of the loop, so without a wakeup the first Dial keypress would be what
+    # woke select() and it would be DISPATCHED BEFORE the pause engaged -
+    # exactly backwards for a safety valve meant to protect a game session.
+    wake_r, wake_w = socket.socketpair()
+    for _s in (wake_r, wake_w):
+        _s.setblocking(False)
+    signal.set_wakeup_fd(wake_w.fileno())
+
     reload_requested = False
+    stop_requested = False
 
     def on_hup(_sig, _frame):
         nonlocal reload_requested
         reload_requested = True
 
+    def on_stop(_sig, _frame):
+        nonlocal stop_requested
+        stop_requested = True
+
     signal.signal(signal.SIGHUP, on_hup)
+    signal.signal(signal.SIGTERM, on_stop)
+    signal.signal(signal.SIGINT, on_stop)
 
     active_atom = d.intern_atom("_NET_ACTIVE_WINDOW")
     confirm_grabs_held = False
     confirm_grabs = None          # initialised here, not inside a branch
     xfd = d.fileno()
+    wake_fd = wake_r.fileno()
+    dead_ready = 0                # consecutive ready-but-no-events rounds
 
     def release_confirm_grabs():
         """Release the temporary Enter grabs ONLY.
@@ -361,101 +478,141 @@ def main() -> int:
             confirm_grabs.remove_all()
         confirm_grabs_held = False
 
-    while True:
-        if reload_requested:
-            reload_requested = False
-            daemon.reload(load())
-            paused = (state_dir() / PAUSE_FLAG).exists()
-            if paused and not daemon.paused:
-                daemon.pause()
-                grabs.remove_all()
-                # The confirm grabs are a SEPARATE set and would otherwise
-                # survive the pause, leaving Return grabbed system-wide with a
-                # confirmation nobody can reach - and, because is_confirm() is
-                # checked before any pause gate, an Enter pressed for an
-                # unrelated reason would still launch the app.
+    try:
+        while True:
+            # Checked before anything else so an orderly stop never dispatches
+            # one more keypress on its way out.
+            if stop_requested:
+                return 0
+
+            if reload_requested:
+                reload_requested = False
+                daemon.reload(load())
+                paused = (state_dir() / PAUSE_FLAG).exists()
+                if paused and not daemon.paused:
+                    daemon.pause()
+                    grabs.remove_all()
+                    # The confirm grabs are a SEPARATE set and would otherwise
+                    # survive the pause, leaving Return grabbed system-wide with a
+                    # confirmation nobody can reach - and, because is_confirm() is
+                    # checked before any pause gate, an Enter pressed for an
+                    # unrelated reason would still launch the app.
+                    release_confirm_grabs()
+                    daemon.launcher.cancel()
+                elif not paused and daemon.paused:
+                    daemon.resume()
+                    _report_grab_failures(
+                        grabs.install(keys.SLOT_KEYCODES.values()))
+
+            # Hold the temporary Enter grabs only while a confirmation is pending.
+            need = daemon.launcher.grabs_needed(confirm_grabs_held)
+            if need and not confirm_grabs_held and not daemon.paused:
+                extra = GrabManager(d, root, masks=grabs.masks)
+                # Keycode 104 (KP_Enter) is EXPECTED to fail every mask here: it
+                # is already grabbed permanently as Dial slot "enter", and X
+                # returns BadAccess for a duplicate grab. Only `Return` (36) can
+                # newly succeed, so the guard must ask "did anything at all get
+                # grabbed" rather than count keycodes - counting would degenerate
+                # into "cancel iff Return failed on any single mask" and would
+                # spuriously abandon a launch that Return could still confirm.
+                extra.install(daemon.launcher.confirm_keycodes())
+                if not extra.active:
+                    extra.remove_all()
+                    daemon.launcher.cancel()
+                    from dials.notify import notify
+                    notify("Cannot confirm launch",
+                           "Enter could not be grabbed; launch cancelled")
+                else:
+                    confirm_grabs = extra
+                    confirm_grabs_held = True
+            elif confirm_grabs_held and not need:
                 release_confirm_grabs()
-                daemon.launcher.cancel()
-            elif not paused and daemon.paused:
-                daemon.resume()
-                grabs.install(keys.SLOT_KEYCODES.values())
 
-        # Hold the temporary Enter grabs only while a confirmation is pending.
-        need = daemon.launcher.grabs_needed(confirm_grabs_held)
-        if need and not confirm_grabs_held and not daemon.paused:
-            extra = GrabManager(d, root, masks=grabs.masks)
-            failed = extra.install(daemon.launcher.confirm_keycodes())
-            if len(failed) == len(daemon.launcher.confirm_keycodes()):
-                # Both confirm keys unavailable: refuse to leave a pending
-                # confirmation with no way to confirm it.
-                extra.remove_all()
-                daemon.launcher.cancel()
-                from dials.notify import notify
-                notify("Cannot confirm launch",
-                       "Enter could not be grabbed; launch cancelled")
-            else:
-                confirm_grabs = extra
-                confirm_grabs_held = True
-        elif confirm_grabs_held and not need:
-            release_confirm_grabs()
-
-        timeout = daemon.select_timeout()
-        try:
-            ready, _, _ = select.select([xfd], [], [], timeout)
-        except InterruptedError:
-            continue
-        if not ready:
-            daemon.tick()
-            continue
-
-        # DO NOT "fix" this to range(max(1, pending_events)).
-        # pending_events() is not a passive queue-length read: python-xlib's
-        # protocol/display.py calls send_and_recv(recv=1) first, so it drains the
-        # socket and then reports how many EVENTS resulted. Verified on this
-        # machine: with select() reporting readable it returned 1, and an idle
-        # connection fired select() 0/3 times - so there is no spin.
-        # A 0 here means the readable bytes were a reply or an error rather than
-        # an event; they have already been consumed, so returning to select() is
-        # correct. Forcing next_event() when the queue is empty would BLOCK
-        # indefinitely (measured), freezing every Dial and every timeout until
-        # some unrelated event arrived.
-        try:
-            pending_events = d.pending_events()
-        except Exception:
-            pending_events = 0
-        for _ in range(pending_events):
+            timeout = daemon.select_timeout()
             try:
-                event = d.next_event()
+                ready, _, _ = select.select([xfd, wake_fd], [], [], timeout)
+            except InterruptedError:      # pre-PEP-475 safety only
+                continue
+
+            if wake_fd in ready:
+                try:
+                    wake_r.recv(4096)     # drain; the flags carry the meaning
+                except BlockingIOError:
+                    pass
+
+            if not ready:
+                daemon.tick()
+                continue
+
+            if xfd not in ready:
+                # Signal-only wakeup: loop back so the flags are acted on now.
+                # Skipping the X read also keeps `dead_ready` honest.
+                continue
+
+            # DO NOT "fix" this to range(max(1, pending_events)).
+            # pending_events() is not a passive queue-length read: python-xlib's
+            # protocol/display.py calls send_and_recv(recv=1) first, so it drains the
+            # socket and then reports how many EVENTS resulted. Verified on this
+            # machine: with select() reporting readable it returned 1, and an idle
+            # connection fired select() 0/3 times - so there is no spin.
+            # A 0 here means the readable bytes were a reply or an error rather than
+            # an event; they have already been consumed, so returning to select() is
+            # correct. Forcing next_event() when the queue is empty would BLOCK
+            # indefinitely (measured), freezing every Dial and every timeout until
+            # some unrelated event arrived.
+            try:
+                pending_events = d.pending_events()
+            except ConnectionClosedError:
+                print("dialsd: X connection closed; exiting for restart",
+                      file=sys.stderr)
+                return 1
             except Exception:
-                break
+                pending_events = 0
 
-            if mons.handles(event):
-                mons.invalidate()
-                continue
-
-            if event.type == X.PropertyNotify and event.atom == active_atom:
-                daemon.on_active_window_changed()
-                continue
-
-            if event.type != X.KeyPress:
-                continue
-
-            keycode = event.detail
-            if not daemon.debouncer.allow(keycode):
-                continue                      # autorepeat
-
-            if daemon.launcher.is_confirm(keycode):
-                daemon.launcher.confirm()
-                continue
-
-            slot = keys.slot_for(keycode)
-            if slot is None:
-                continue
-            if slot == keys.ASSIGN_SLOT:
-                daemon.arm_assign()
-            elif daemon.assign.armed:
-                daemon.handle_assign_key(slot)
+            # A peer-closed X socket is permanently readable while yielding no
+            # events, which would spin at 100% CPU forever. python-xlib does
+            # raise ConnectionClosedError on EOF, but this bounded guard also
+            # covers any readable-yet-eventless state it does not: exit so
+            # systemd (Restart=on-failure, PartOf=graphical-session.target) can
+            # restart us with the next session.
+            if pending_events == 0:
+                dead_ready += 1
+                if dead_ready > MAX_DEAD_READY:
+                    print("dialsd: X fd readable with no events; assuming the "
+                          "connection is dead, exiting for restart",
+                          file=sys.stderr)
+                    return 1
             else:
-                daemon.handle_slot(slot, timestamp=event.time)
+                dead_ready = 0
 
-    return 0
+            for _ in range(pending_events):
+                try:
+                    event = d.next_event()
+                except ConnectionClosedError:
+                    print("dialsd: X connection closed; exiting for restart",
+                          file=sys.stderr)
+                    return 1
+                except Exception:
+                    break
+
+                if mons.handles(event):
+                    mons.invalidate()
+                    continue
+
+                if event.type == X.PropertyNotify and event.atom == active_atom:
+                    daemon.on_active_window_changed()
+                    continue
+
+                if event.type != X.KeyPress:
+                    continue
+
+                daemon.dispatch_key(event.detail, timestamp=event.time)
+    finally:
+        # Orderly stop. Grabs being process-scoped only covers a CRASH; an
+        # orderly stop must not rely on that, and leaving `Return` grabbed
+        # would take Enter away system-wide until the next login.
+        release_confirm_grabs()
+        grabs.remove_all()
+        signal.set_wakeup_fd(-1)
+        wake_r.close()
+        wake_w.close()

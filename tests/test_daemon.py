@@ -1,3 +1,6 @@
+import pytest
+
+from dials import keys
 from dials.config import Dial, loads
 from dials.daemon import Daemon
 from dials.geometry import Monitor, Rect
@@ -74,16 +77,37 @@ class FakeMonitors:
         pass
 
 
-def win(wid, cls="spotify"):
+class Notes(list):
+    """Recording notifier. Matches `notify(summary, body="", **kw)`."""
+
+    def __call__(self, summary, body="", **kw):
+        self.append((summary, body))
+        return True
+
+    def mentions(self, needle):
+        return any(needle.lower() in (s + " " + b).lower() for s, b in self)
+
+
+def win(wid, cls="spotify", appeared=0.0):
     return WindowInfo(wid=wid, wm_class=cls,
                       wtype="_NET_WM_WINDOW_TYPE_NORMAL",
-                      override_redirect=False, transient_for=None, appeared=0.0)
+                      override_redirect=False, transient_for=None,
+                      appeared=appeared)
 
 
-def daemon(ops, config=CONFIG, clock=None):
+def daemon(ops, config=CONFIG, clock=None, notifier=None, spawner=None,
+           confirm_runner=None):
+    # `is None` rather than `or`: an empty Notes() is a falsy list, so `notifier
+    # or default` would silently throw the recorder away and every notification
+    # assertion would pass vacuously.
+    if notifier is None:
+        notifier = lambda *a, **k: True          # noqa: E731
+    if spawner is None:
+        spawner = lambda cmd: None               # noqa: E731
     return Daemon(config=config, ops=ops, monitors=FakeMonitors(),
-                  clock=clock or FakeClock(), notifier=lambda *a, **k: True,
-                  spawner=lambda cmd: None)
+                  clock=clock if clock is not None else FakeClock(),
+                  notifier=notifier, spawner=spawner,
+                  confirm_runner=confirm_runner)
 
 
 # ---- action dispatch ----------------------------------------------------
@@ -243,13 +267,17 @@ def test_select_timeout_picks_the_nearest_deadline():
     assert 1.9 <= t <= 2.1, f"expected the nearer (assign) deadline, got {t}"
 
 
-def test_pausing_releases_a_pending_launch():
-    """A paused daemon must not leave a confirmation Enter could still fire."""
+def test_a_paused_daemon_cannot_arm_a_new_confirmation():
+    """Replaces a test that only re-asserted LaunchCoordinator.cancel().
+
+    Pause is the safety valve for a game or remote-desktop session, so the
+    invariant that matters is that a paused daemon arms NOTHING - no pending
+    confirmation, and therefore no finite select() timeout keeping the process
+    awake.
+    """
     d = daemon(FakeOps(windows=[]))
-    d.handle_slot("9", timestamp=1)
-    assert d.launcher.pending is not None
     d.pause()
-    d.launcher.cancel()                  # what main()'s pause path does
+    assert d.dispatch_key(keys.keycode_for("9"), timestamp=1) is None
     assert d.launcher.pending is None
     assert d.select_timeout() is None
 
@@ -281,3 +309,270 @@ def test_reload_abandons_in_flight_transitions():
     ops.active = 999
     d.on_active_window_changed()
     assert ("iconify", 5) not in ops.calls
+
+
+def test_reload_rebuilds_assign_mode_with_the_new_defaults():
+    """AssignMode snapshots `defaults` at construction, so reload must rebuild it.
+
+    Otherwise a Dial assigned after SIGHUP silently inherits the PRE-reload
+    on_focus_loss / pin_geometry.
+    """
+    ops = FakeOps(windows=[win(5)], active=5)
+    d = daemon(ops)
+    assert CONFIG.defaults.on_focus_loss == "hide"      # the stale value
+
+    d.reload(loads("""
+[defaults]
+on_focus_loss = "above"
+pin_geometry = true
+"""))
+    d.arm_assign()
+    bound = d.assign.resolve("7", None)
+    assert bound.on_focus_loss == "above"
+    assert bound.pin_geometry is True
+
+
+def test_reload_does_not_leave_a_stale_capture_armed():
+    ops = FakeOps(windows=[win(5)], active=5)
+    d = daemon(ops)
+    d.arm_assign()
+    assert d.assign.armed is True
+    d.reload(CONFIG)
+    assert d.assign.armed is False
+
+
+# ---- assign mode --------------------------------------------------------
+
+def test_arm_assign_snapshots_the_active_window():
+    ops = FakeOps(windows=[win(5)], active=5)
+    d = daemon(ops)
+    d.arm_assign()
+    assert d.assign.armed is True
+
+    bound = d.assign.resolve("7", None)
+    assert bound.slot == "7"
+    assert bound.match_class == "spotify"       # from ops.list_windows()
+    assert bound.label == "A Window"            # from ops.window_name()
+    assert bound.monitor == "HDMI-0"            # from FakeMonitors()
+    # ops.geometry() is 800x600 at 0,0 on a 3440x1440 monitor.
+    assert bound.rect == (0.0, 0.0, 0.2326, 0.4167)
+
+
+def test_arm_assign_without_an_active_window_notifies_and_does_not_arm():
+    notes = Notes()
+    d = daemon(FakeOps(windows=[], active=None), notifier=notes)
+    d.arm_assign()
+    assert d.assign.armed is False
+    assert notes.mentions("no active window")
+
+
+def test_arm_assign_ignores_an_unmanageable_active_window():
+    """_NET_ACTIVE_WINDOW can name a window absent from _NET_CLIENT_LIST."""
+    notes = Notes()
+    d = daemon(FakeOps(windows=[win(5)], active=4242), notifier=notes)
+    d.arm_assign()
+    assert d.assign.armed is False
+    assert notes.mentions("not manageable")
+
+
+def test_pressing_the_assign_key_again_cancels():
+    notes = Notes()
+    ops = FakeOps(windows=[win(5)], active=5)
+    d = daemon(ops, notifier=notes)
+    d.arm_assign()
+    d.arm_assign()
+    assert d.assign.armed is False
+    assert notes.mentions("cancelled")
+
+
+def test_handle_assign_key_persists_an_empty_slot(monkeypatch):
+    """Exercises the LAZY import of the TOML writer inside _persist."""
+    import dials.configwrite as cw
+    saved = []
+    monkeypatch.setattr(cw, "upsert_dial",
+                        lambda path, dial: saved.append(dial) or CONFIG)
+
+    ops = FakeOps(windows=[win(5)], active=5)
+    d = daemon(ops)
+    d.arm_assign()
+    d.handle_assign_key("7")                    # slot 7 is unbound in CONFIG
+    assert [dl.slot for dl in saved] == ["7"]
+    assert saved[0].match_class == "spotify"
+
+
+def test_handle_assign_key_on_an_occupied_slot_confirms_and_saves_nothing(
+        monkeypatch):
+    import dials.configwrite as cw
+    monkeypatch.setattr(cw, "upsert_dial", lambda path, dial: pytest.fail(
+        "an occupied slot must not be overwritten without confirmation"))
+
+    asked = []
+    ops = FakeOps(windows=[win(5)], active=5)
+    d = daemon(ops, confirm_runner=asked.append)
+    d.arm_assign()
+    d.handle_assign_key("9")                    # slot 9 is Spotify in CONFIG
+    assert len(asked) == 1
+    assert asked[0].existing.label == "Spotify"
+    assert asked[0].incoming.slot == "9"
+
+
+def test_handle_assign_key_without_a_capture_notifies_and_does_not_raise():
+    notes = Notes()
+    d = daemon(FakeOps(windows=[win(5)], active=5), notifier=notes)
+    d.handle_assign_key("7")                    # never armed
+    assert notes.mentions("assign failed")
+
+
+def test_handle_assign_key_rejects_the_reserved_assign_slot():
+    notes = Notes()
+    ops = FakeOps(windows=[win(5)], active=5)
+    d = daemon(ops, notifier=notes)
+    d.arm_assign()
+    d.handle_assign_key(".")
+    assert notes.mentions("reserved")
+
+
+def test_a_failing_toml_writer_notifies_instead_of_raising(monkeypatch):
+    """`_persist` is a keypress path: nothing there may kill the daemon."""
+    import dials.configwrite as cw
+
+    def boom(path, dial):
+        raise OSError("disk on fire")
+
+    monkeypatch.setattr(cw, "upsert_dial", boom)
+    notes = Notes()
+    ops = FakeOps(windows=[win(5)], active=5)
+    d = daemon(ops, notifier=notes)
+    d.arm_assign()
+    d.handle_assign_key("7")
+    assert notes.mentions("could not save")
+
+
+# ---- key dispatch ordering ----------------------------------------------
+
+def test_the_confirm_key_confirms_instead_of_firing_its_own_dial():
+    """KP_Enter is BOTH a confirm key and slot "enter".
+
+    `is_confirm` therefore has to be checked before `slot_for`, or Enter would
+    dispatch its own (here unbound) Dial and the launch could never be
+    confirmed.
+    """
+    spawned = []
+    d = daemon(FakeOps(windows=[]), spawner=spawned.append)
+    assert d.dispatch_key(keys.keycode_for("9"), timestamp=10) == LAUNCH
+
+    assert d.dispatch_key(keys.KP_ENTER_KEYCODE, timestamp=20) == "confirm"
+    assert spawned == ["/snap/bin/spotify"]
+    assert d.launcher.pending.launched_at is not None
+
+
+def test_main_return_also_confirms_a_pending_launch():
+    spawned = []
+    d = daemon(FakeOps(windows=[]), spawner=spawned.append)
+    d.dispatch_key(keys.keycode_for("9"), timestamp=10)
+    assert d.dispatch_key(keys.RETURN_KEYCODE, timestamp=20) == "confirm"
+    assert spawned == ["/snap/bin/spotify"]
+
+
+def test_autorepeat_is_swallowed_at_dispatch():
+    """Holding a Dial key must not toggle it repeatedly."""
+    ops = FakeOps(windows=[win(5)], hidden=[5])
+    clk = FakeClock()
+    d = daemon(ops, clock=clk)
+    kc = keys.keycode_for("9")
+
+    assert d.dispatch_key(kc, timestamp=1) == SHOW
+    assert d.dispatch_key(kc, timestamp=2) is None      # autorepeat, swallowed
+    clk.advance(0.5)
+    assert d.dispatch_key(kc, timestamp=3) == HIDE      # a real second press
+
+
+def test_an_unknown_keycode_is_ignored():
+    d = daemon(FakeOps(windows=[win(5)]))
+    assert d.dispatch_key(9999, timestamp=1) is None
+
+
+def test_the_assign_key_arms_assign_mode_through_dispatch():
+    ops = FakeOps(windows=[win(5)], active=5)
+    d = daemon(ops)
+    assert d.dispatch_key(keys.keycode_for("."), timestamp=1) == "assign"
+    assert d.assign.armed is True
+
+
+def test_a_dial_key_binds_rather_than_toggles_while_assign_is_armed():
+    asked = []
+    ops = FakeOps(windows=[win(5)], active=5)
+    d = daemon(ops, confirm_runner=asked.append)
+    d.dispatch_key(keys.keycode_for("."), timestamp=1)
+    assert d.dispatch_key(keys.keycode_for("9"), timestamp=2) == "bind"
+    assert len(asked) == 1                  # went to assign, not to the Dial
+    assert ops.calls == []                  # Dial 9 was NOT toggled
+
+
+# ---- post-launch activation --------------------------------------------
+
+def test_post_launch_activation_uses_the_confirming_keypress_timestamp():
+    """CurrentTime (0) is ruled out: EWMH wants a real user-activity time."""
+    clk = FakeClock()
+    ops = FakeOps(windows=[])
+    d = daemon(ops, clock=clk)
+    d.dispatch_key(keys.keycode_for("9"), timestamp=10)
+    d.dispatch_key(keys.RETURN_KEYCODE, timestamp=4242)
+
+    # The launched window appears after launched_at.
+    ops.windows = [win(11, appeared=clk.t + 1.0)]
+    d.on_active_window_changed()
+
+    assert ("activate", 11, 4242) in ops.calls
+    assert ("activate", 11, 0) not in ops.calls
+    assert d.launcher.pending is None       # stopped waiting
+
+
+def test_a_pre_existing_window_is_not_mistaken_for_the_launched_one():
+    clk = FakeClock()
+    ops = FakeOps(windows=[])
+    d = daemon(ops, clock=clk)
+    d.dispatch_key(keys.keycode_for("9"), timestamp=10)
+    d.dispatch_key(keys.RETURN_KEYCODE, timestamp=20)
+
+    ops.windows = [win(11, appeared=clk.t - 5.0)]      # older than the launch
+    d.on_active_window_changed()
+    assert ops.calls == []
+    assert d.launcher.pending is not None              # still waiting
+
+
+# ---- tick ---------------------------------------------------------------
+
+def test_tick_expires_an_armed_confirmation():
+    clk = FakeClock()
+    d = daemon(FakeOps(windows=[]), clock=clk)
+    d.handle_slot("9", timestamp=1)
+    assert d.launcher.pending is not None
+
+    clk.advance(5.0)
+    d.tick()
+    assert d.launcher.pending is None
+    assert d.select_timeout() is None       # back to an infinite block
+
+
+def test_tick_expires_an_unanswered_activation():
+    ops = FakeOps(windows=[win(5)], hidden=[5])
+    clk = FakeClock()
+    d = daemon(ops, clock=clk)
+    d.handle_slot("9", timestamp=1)
+    assert d.select_timeout() is not None
+
+    clk.advance(1.5)
+    d.tick()
+    assert d.select_timeout() is None
+
+
+def test_tick_expires_an_armed_assign_capture():
+    from dials.assign import Capture
+    clk = FakeClock()
+    d = daemon(FakeOps(windows=[]), clock=clk)
+    d.assign.arm(Capture(1, "x", "x", "HDMI-0", (0, 0, 1, 1), clk.t))
+    clk.advance(5.0)
+    d.tick()
+    assert d.assign.armed is False
+    assert d.select_timeout() is None
