@@ -1,5 +1,3 @@
-import os
-
 import pytest
 
 from dials.config import Dial, load, loads
@@ -41,6 +39,25 @@ def test_write_atomic_creates_parent_directories(tmp_path):
     target = tmp_path / "deep" / "nested" / "config.toml"
     write_atomic(target, "x = 1\n")
     assert target.exists()
+
+
+def test_write_atomic_cleans_up_its_temp_file_when_the_write_fails(tmp_path, monkeypatch):
+    """A failed write must not litter, and must re-raise rather than swallow.
+
+    Without the except-branch cleanup, the mkstemp file would survive as
+    .config-XXXX.toml in the user's config directory on every failed write.
+    """
+    import dials.configwrite as mod
+
+    def boom(src, dst):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(mod.os, "replace", boom)
+    with pytest.raises(OSError, match="disk full"):
+        mod.write_atomic(tmp_path / "config.toml", "a = 1\n")
+
+    assert not (tmp_path / "config.toml").exists()
+    assert list(tmp_path.iterdir()) == [], "temp file was left behind"
 
 
 def test_upsert_adds_a_dial_to_a_missing_file(tmp_config_path):
