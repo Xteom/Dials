@@ -49,7 +49,12 @@ def move(grid, slot: str, dx: int, dy: int) -> str:
     if not (0 <= nr < len(grid)) or not (0 <= nc < len(grid[nr])):
         return slot
     if not grid[nr][nc]:
-        # Skip a gap by continuing in the same direction.
+        # Gap: continue one more step in the same direction. NOTE: for the
+        # GRID shipped today this never succeeds, because every gap sits at
+        # the trailing edge and the second step is out of range, so control
+        # falls through to the stay-put return below. It is kept as a guard
+        # for future layouts with an interior gap, and is covered by
+        # test_move_skips_an_interior_gap using a synthetic grid.
         nr2, nc2 = nr + dy, nc + dx
         if 0 <= nr2 < len(grid) and 0 <= nc2 < len(grid[nr2]) and grid[nr2][nc2]:
             return grid[nr2][nc2]

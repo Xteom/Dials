@@ -68,6 +68,28 @@ def test_move_skips_empty_grid_cells():
                 assert move(GRID, slot, dx, dy) in {s for r in GRID for s in r if s}
 
 
+def test_move_skips_an_interior_gap():
+    """The gap-skip branch is unreachable with the shipped GRID, so prove it
+    works against a layout that does have an interior gap."""
+    synthetic = (
+        ("a", "", "b"),
+        ("c", "d", "e"),
+    )
+    # Moving right from "a" must skip the gap and land on "b", not stay on "a".
+    assert move(synthetic, "a", 1, 0) == "b"
+    # And leftwards symmetrically.
+    assert move(synthetic, "b", -1, 0) == "a"
+
+
+def test_move_stays_when_a_gap_has_nothing_beyond_it():
+    """Trailing-edge gap: the skip target is out of range, so stay put.
+    This is the case every gap in the real GRID hits."""
+    synthetic = (
+        ("a", "b", ""),
+    )
+    assert move(synthetic, "b", 1, 0) == "b"
+
+
 def test_detail_lines_include_every_editable_field():
     text = "\n".join(detail_lines(dial()))
     for expected in ("spotify", "HDMI-0", "hide", "50"):
