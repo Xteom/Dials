@@ -65,3 +65,19 @@ def test_rects_are_frozen():
     import dataclasses
     with pytest.raises(dataclasses.FrozenInstanceError):
         Rect(0, 0, 1, 1).x = 5
+
+
+def test_monitor_field_order_is_positional_stable():
+    """Later tasks construct Monitor positionally; a field reorder must fail here."""
+    m = Monitor("HDMI-0", HDMI, False, 63)
+    assert m.name == "HDMI-0"
+    assert m.rect == HDMI
+    assert m.primary is False
+    assert m.crtc == 63
+
+
+def test_clamped_to_pins_the_far_edge_boundary():
+    """x at the far edge must stay addressable inside bounds, never at w itself."""
+    assert Rect(100, 0, 1, 1).clamped_to(Rect(0, 0, 100, 100)) == Rect(99, 0, 1, 1)
+    assert Rect(0, 100, 1, 1).clamped_to(Rect(0, 0, 100, 100)) == Rect(0, 99, 1, 1)
+    assert Rect(500, 500, 10, 10).clamped_to(Rect(0, 0, 100, 100)) == Rect(99, 99, 1, 1)
