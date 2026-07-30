@@ -1,0 +1,256 @@
+"""Command-line interface.
+
+Every side effect is injected through `Deps` so each subcommand is testable
+without touching the filesystem, the daemon, or X.
+"""
+from __future__ import annotations
+
+import argparse
+import os
+import signal
+import sys
+from dataclasses import dataclass, field
+from pathlib import Path
+
+from dials import icons, keys
+from dials.config import (
+    ConfigError, config_path, load as load_config, reference_path, state_dir,
+)
+
+PAUSE_FLAG = "paused"
+
+
+# ---- injectable side effects --------------------------------------------
+
+def _pause_get() -> bool:
+    return (state_dir() / PAUSE_FLAG).exists()
+
+
+def _pause_set(value: bool) -> None:
+    state_dir().mkdir(parents=True, exist_ok=True)
+    flag = state_dir() / PAUSE_FLAG
+    if value:
+        flag.touch()
+    elif flag.exists():
+        flag.unlink()
+
+
+def _signal_daemon() -> bool:
+    """SIGHUP the running daemon so it re-reads config without restarting."""
+    import subprocess
+    try:
+        result = subprocess.run(["pgrep", "-x", "dialsd"],
+                                capture_output=True, text=True)
+        pids = [int(p) for p in result.stdout.split()]
+    except Exception:
+        return False
+    for pid in pids:
+        try:
+            os.kill(pid, signal.SIGHUP)
+        except Exception:
+            return False
+    return bool(pids)
+
+
+def _list_windows():
+    from Xlib import display
+    from dials.windows import WindowOps
+    d = display.Display()
+    return WindowOps(d, d.screen().root).list_windows()
+
+
+def _upsert(path, dial):
+    from dials.configwrite import upsert_dial
+    return upsert_dial(path, dial)
+
+
+def _remove(path, slot):
+    from dials.configwrite import remove_dial
+    return remove_dial(path, slot)
+
+
+def _export(live=None, ref=None):
+    from dials.configwrite import export_reference
+    return export_reference(live, ref)
+
+
+def _differs(live=None, ref=None):
+    from dials.configwrite import reference_differs
+    return reference_differs(live, ref)
+
+
+@dataclass
+class Deps:
+    load: callable = load_config
+    upsert: callable = _upsert
+    remove: callable = _remove
+    export: callable = _export
+    differs: callable = _differs
+    pause_get: callable = _pause_get
+    pause_set: callable = _pause_set
+    signal_daemon: callable = _signal_daemon
+    list_windows: callable = _list_windows
+    out: object = field(default_factory=lambda: sys.stdout)
+
+
+# ---- subcommands --------------------------------------------------------
+
+def _cmd_list(args, d: Deps) -> int:
+    cfg = d.load()
+    print(f"{'slot':<6} {'':<2} {'label':<22} {'class':<16} "
+          f"{'monitor':<10} {'rect':<26} focus-loss", file=d.out)
+    for slot in keys.BINDABLE_SLOTS:
+        dial = cfg.dial(slot)
+        if dial is None:
+            print(f"{slot:<6} {'':<2} {'(unbound)':<22}", file=d.out)
+            continue
+        glyph = icons.glyph_for(dial.match_class, dial.icon)
+        rect = ("[" + ", ".join(f"{v:g}" for v in dial.rect) + "]")
+        print(f"{slot:<6} {glyph:<2} {dial.label:<22} {dial.match_class:<16} "
+              f"{dial.monitor:<10} {rect:<26} {dial.on_focus_loss}", file=d.out)
+    return 0
+
+
+def _validate_slot(slot: str, d: Deps) -> int | None:
+    if slot == keys.ASSIGN_SLOT:
+        print(f"'{slot}' is reserved for assign mode", file=d.out)
+        return 2
+    if not keys.is_bindable(slot):
+        print(f"not a bindable slot: {slot!r}", file=d.out)
+        return 2
+    return None
+
+
+def _cmd_unbind(args, d: Deps) -> int:
+    bad = _validate_slot(args.slot, d)
+    if bad:
+        return bad
+    d.remove(config_path(), args.slot)
+    d.signal_daemon()
+    print(f"unbound {args.slot}", file=d.out)
+    return 0
+
+
+def _cmd_capture(args, d: Deps) -> int:
+    """Save the matched window's current geometry into its Dial."""
+    bad = _validate_slot(args.slot, d)
+    if bad:
+        return bad
+    cfg = d.load()
+    dial = cfg.dial(args.slot)
+    if dial is None:
+        print(f"slot {args.slot} is unbound", file=d.out)
+        return 2
+    from dials.assign import derive_rect
+    from dials.daemon import _monitor_containing
+    from dials.geometry import Rect
+    from Xlib import display
+    from dials.monitors import MonitorSource
+    from dials.windows import WindowOps, choose
+
+    dsp = display.Display()
+    ops = WindowOps(dsp, dsp.screen().root)
+    mons = MonitorSource(dsp, dsp.screen().root)
+    chosen = choose(ops.list_windows(), dial.match_class,
+                    active_id=ops.active_window())
+    if chosen is None:
+        print(f"no window matching class {dial.match_class!r}", file=d.out)
+        return 1
+    rect = ops.geometry(chosen.wid) or Rect(0, 0, 800, 600)
+    monitor = _monitor_containing(rect, mons.monitors(), mons.root_rect())
+    from dataclasses import replace
+    updated = replace(dial, monitor=monitor.name,
+                      rect=derive_rect(rect, monitor))
+    d.upsert(config_path(), updated)
+    d.signal_daemon()
+    print(f"captured {args.slot}: {monitor.name} "
+          f"{[round(v, 3) for v in updated.rect]}", file=d.out)
+    return 0
+
+
+def _cmd_pause(args, d: Deps) -> int:
+    d.pause_set(True)
+    d.signal_daemon()
+    print("paused - the numpad now behaves normally in both NumLock states",
+          file=d.out)
+    return 0
+
+
+def _cmd_resume(args, d: Deps) -> int:
+    d.pause_set(False)
+    d.signal_daemon()
+    print("resumed", file=d.out)
+    return 0
+
+
+def _cmd_reload(args, d: Deps) -> int:
+    ok = d.signal_daemon()
+    print("reload signalled" if ok else "no running dialsd found", file=d.out)
+    return 0 if ok else 1
+
+
+def _cmd_status(args, d: Deps) -> int:
+    try:
+        cfg = d.load()
+        bound = len(cfg.dials)
+        problem = None
+    except ConfigError as exc:
+        bound, problem = 0, str(exc)
+    print(f"state:     {'paused' if d.pause_get() else 'active'}", file=d.out)
+    print(f"dials:     {bound} bound of {len(keys.BINDABLE_SLOTS)} slots",
+          file=d.out)
+    if problem:
+        print(f"config:    ERROR {problem}", file=d.out)
+    return 0
+
+
+def _cmd_config(args, d: Deps) -> int:
+    if getattr(args, "export", False):
+        path = d.export()
+        print(f"reference snapshot written: {path}", file=d.out)
+        return 0
+    print(f"live:      {config_path()}", file=d.out)
+    print(f"reference: {reference_path()}", file=d.out)
+    drifted = d.differs()
+    print(f"snapshot:  {'differs from live' if drifted else 'up to date'}",
+          file=d.out)
+    return 0
+
+
+# ---- entry point --------------------------------------------------------
+
+def main(argv=None, deps: Deps | None = None, tui=None) -> int:
+    d = deps or Deps()
+    argv = list(sys.argv[1:] if argv is None else argv)
+
+    parser = argparse.ArgumentParser(prog="dials",
+                                     description="Numpad window Dials")
+    sub = parser.add_subparsers(dest="command")
+
+    sub.add_parser("list", help="show every slot")
+    p = sub.add_parser("unbind", help="clear a slot")
+    p.add_argument("slot")
+    p = sub.add_parser("capture", help="save the window's current geometry")
+    p.add_argument("slot")
+    sub.add_parser("pause", help="release all grabs")
+    sub.add_parser("resume", help="re-install grabs")
+    sub.add_parser("reload", help="SIGHUP the daemon")
+    sub.add_parser("status", help="daemon and config health")
+    cfg = sub.add_parser("config", help="show or export config paths")
+    cfg.add_argument("export", nargs="?", default=None)
+
+    if not argv:
+        if tui is None:
+            from dials.tui import run as tui
+        return tui(d.load())
+
+    args = parser.parse_args(argv)
+    if args.command == "config":
+        args.export = (args.export == "export")
+
+    handlers = {
+        "list": _cmd_list, "unbind": _cmd_unbind, "capture": _cmd_capture,
+        "pause": _cmd_pause, "resume": _cmd_resume, "reload": _cmd_reload,
+        "status": _cmd_status, "config": _cmd_config,
+    }
+    return handlers[args.command](args, d)
