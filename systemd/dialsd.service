@@ -3,6 +3,17 @@ Description=Dials - numpad window panels
 Documentation=https://github.com/Xteom/Dials
 PartOf=graphical-session.target
 After=graphical-session.target
+# Restart=on-failure with RestartSec=2 against systemd's DEFAULT ceiling of 5
+# starts in 10s means ~10s of repeated failure leaves the unit permanently
+# `failed` and the numpad layer dead until a human runs `systemctl --user reset-
+# failed`. Two designed paths can reach that: a config that fails to parse at
+# startup (there is no last-good config to keep at that point, so the startup
+# load stays fatal by design), and the X-restart recovery path, where the daemon
+# deliberately exits non-zero so it can be restarted with the new session - and
+# a session that is still coming up can refuse a connection several times in a
+# row. 10 attempts over 60s survives both without hiding a genuine crash loop.
+StartLimitIntervalSec=60
+StartLimitBurst=10
 
 [Service]
 Type=simple
@@ -10,8 +21,9 @@ ExecStart=%h/.local/share/dials/venv/bin/dialsd
 ExecReload=/bin/kill -HUP $MAINPID
 Restart=on-failure
 RestartSec=2
-# Guard rails, not the plan: the budget is 0.0% CPU and <=16MB RSS at idle.
-# A daemon that needs these has already regressed.
+# Guard rails, not the plan: measured idle is 0.000% CPU and PSS 10.6MB /
+# RSS 16.9MB (see the README), so these caps have wide headroom. A daemon that
+# needs them has already regressed.
 MemoryMax=64M
 CPUQuota=5%
 Nice=5
