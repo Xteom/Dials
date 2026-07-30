@@ -631,8 +631,22 @@ If the entry ever does go missing, the fallback bypasses `profiles.ini` entirely
 to Firefox's own configuration:
 
 ```
-firefox --profile /home/xteom/.mozilla/firefox/wcobxzqa.dial6 --class=Dial6 --no-remote --new-instance
+firefox --profile ~/.mozilla/firefox/wcobxzqa.dial6 --class=Dial6 --no-remote --new-instance
 ```
+
+### Paths in launch commands
+
+`launch` strings are run **without a shell** — `shlex.split` then `Popen` — so nothing would
+expand `~` or `$HOME` on its own. Written naively, the fallback line above would hand Firefox a
+literal directory named `~` and silently create a junk profile there.
+
+The launcher therefore expands each argv token itself, via `os.path.expandvars` then
+`os.path.expanduser`, including after an `=` so `--profile=~/x` works as well as
+`--profile ~/x`. Both `~` and `$HOME`-style variables are supported, and an unset variable is
+left untouched rather than becoming an empty string.
+
+Config therefore uses `~` rather than absolute paths, which keeps a machine-specific home
+directory out of a version-controlled, publicly visible repository.
 
 `match_class` is `Dial6`, matching the profile name, so which Firefox window belongs to which Dial is
 obvious from either side. Because the class is what identifies the window, it must stay in sync with
