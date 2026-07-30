@@ -1,9 +1,13 @@
 """Monitor enumeration and selection.
 
-RandR 1.2 is used because python-xlib 0.29 does not implement the RandR 1.5
-`get_monitors` call (verified in docs/probes/06). 1.2 enumerates *outputs*, so
-mirrored outputs share a CRTC and must be deduplicated to avoid reporting two
-monitors with identical rects.
+RandR **1.2** is used deliberately, not for lack of an alternative: the 1.5
+`get_monitors` call is absent from python-xlib 0.29 (probe 06 ran against the
+system 0.29) and this project's floor is `python-xlib>=0.29`, so 1.2 is the
+portable choice. The venv installs 0.33, which DOES have `get_monitors`, so
+re-running probe 06 there reports the opposite - that is a version difference,
+not a contradiction. 1.2 enumerates *outputs* rather than logical monitors,
+which is exactly why the CRTC dedup below is required: mirrored outputs share
+one CRTC and would otherwise appear as two monitors with identical rects.
 
 This module is split: the functions below are pure and fully unit-tested; the
 X I/O lives in `MonitorSource` and simply produces `RawOutput` records for

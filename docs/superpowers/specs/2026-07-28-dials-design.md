@@ -85,7 +85,7 @@ be re-run if GNOME, Firefox, or the monitor layout changes.
 | Anything on this system reserves screen space | No managed window sets `_NET_WM_STRUT`/`_STRUT_PARTIAL`, and `_NET_WORKAREA` equals the full root box with zero insets. Shell chrome (top bar) is not a managed window and is not covered by this | `05` |
 | NumLock state readable | Yes — `get_keyboard_control().led_mask & 0x2`, agrees with `xset` | `05` |
 | python-xlib exposes XKB (for event-driven NumLock) | **No** — server has `XKEYBOARD`, the binding does not | `05` |
-| Monitors enumerable in pure python-xlib | Yes, via the RandR **1.2** path; `get_monitors` (1.5) is absent from the binding | `06` |
+| Monitors enumerable in pure python-xlib | Yes, via the RandR **1.2** path. `get_monitors` (1.5) is absent from python-xlib **0.29** (the system copy the probe ran against) and present in **0.33** (what the venv installs); since the project floor is `>=0.29`, 1.2 is the portable choice and is used deliberately | `06` |
 | Monitor hotplug **subscription** accepted | Yes — `randr.select_input(RRScreenChangeNotifyMask …)` succeeds. This proves the mask registers, **not** that events are received and decoded; a live hotplug test is an implementation task | `06` |
 | Cost of one NumLock read | 28.4 µs; a 1 Hz poll is 0.0028 % of one core | `06` |
 
@@ -353,8 +353,10 @@ Layout as of probe `06`:
 ### Enumeration
 
 Pure python-xlib, RandR **1.2** API — `get_screen_resources` → `get_output_info` → `get_crtc_info`,
-plus `get_output_primary`. The 1.5 `get_monitors` call is *not* available in python-xlib 0.29 (probe
-`06`), so it is not used. Outputs with `crtc == 0` are skipped as disconnected.
+plus `get_output_primary`. The 1.5 `get_monitors` call is absent from python-xlib **0.29** (probe
+`06`) and present in **0.33** (what the venv installs); because the dependency floor is `>=0.29`,
+1.2 is the portable choice and is used deliberately rather than for lack of an alternative. Outputs
+with `crtc == 0` are skipped as disconnected.
 
 **RandR 1.2 enumerates outputs, not logical monitors**, which matters: mirrored outputs share one
 CRTC and would otherwise appear as two "monitors" with identical rects. Results are therefore
@@ -848,15 +850,34 @@ keeps the always-on process purely event-driven per the AGENTS.md daemon rules.
 
 ## Resource budget
 
-Lightweight is a hard requirement, not an aspiration, so it gets stated as numbers the build must hit
-and design rules that produce them. The reference point is the sibling `clip` daemon: same stack
-(python-xlib on Python 3.10, event-driven, no GTK), measured at ~14 MB idle.
+Lightweight is a hard requirement, not an aspiration, so it gets stated as numbers plus the design
+rules that produce them. The reference point is the sibling `clip` daemon: same stack (python-xlib on
+Python 3.10, event-driven, no GTK), measured at ~14 MB idle.
 
-| Process | Idle CPU | Idle RSS | Wakeups at idle |
-| --- | --- | --- | --- |
-| `dialsd` (always on) | **0.0 %** | **≤ 16 MB** | **0 / s** |
-| `dials-tray` (opt-in) | ≤ 0.01 % | ≤ 45 MB (GTK) | 1 / s |
-| `dials`, `dials-confirm` | transient — contribute nothing at idle | | |
+The table below is **as measured**, not as estimated: the original figures here were arithmetic on the
+cheap half of a tray tick and an RSS guess, and two of the three tray numbers did not survive contact
+with a real measurement. **PSS is the primary metric** for both processes — most of either RSS figure
+is shared library pages (the CPython/libc baseline every Python process pays, and GTK libraries other
+GTK apps on this desktop already keep resident), so RSS overstates what Dials itself costs.
+
+| Process | Idle CPU | Idle PSS | Idle RSS | Wakeups at idle |
+| --- | --- | --- | --- | --- |
+| `dialsd` (always on) | **0.000 %** | **10.6 MB** | 16.9 MB | **0.0 / s** |
+| `dials-tray` (opt-in) | 0.055 % | 24.8 MB | 62.7 MB | ~2 / s |
+| `dials`, `dials-confirm` | transient — contribute nothing at idle | | | |
+
+Measured from `.venv/bin/dialsd` against scratch `XDG_CONFIG_HOME`/`XDG_STATE_HOME` seeded with the
+two reference Dials, idle for 65 s with no keypresses and no NumLock toggle (Task 22).
+
+`dialsd`'s **0.0 wakeups/s is an exact zero delta** in voluntary context switches over that window —
+the concrete proof that `select()` really does block with a `None` timeout and the process is not
+scheduled at all when nothing is armed. That is the number this whole design exists to protect.
+
+`dials-tray`'s residual 0.055 % CPU is **`Gtk.StatusIcon`'s own mainloop**, X11 and tray-protocol
+overhead — not the polling logic: one tick of the actual `led_mask` read costs ~29 µs, about five
+orders of magnitude below the 1 s interval. No implementation of a GTK status icon reaches the
+0.01 % this section originally claimed, so that figure was unachievable rather than merely missed.
+The tray remains opt-in precisely because it is the only component that polls at all.
 
 ### How the daemon reaches zero
 
@@ -894,8 +915,10 @@ trade was made deliberately:
   than folded in. Running without it costs nothing; `dials status` gives the same information from the
   CLI.
 
-Verification is not optional: the numbers above get measured with the daemon idle for several minutes
-and written into the README, and a build that misses them is not finished.
+Verification is not optional: the numbers above were measured with the daemon idle rather than
+estimated, and are recorded in the README as well. The one line that matters most — `dialsd` doing
+literally nothing at idle — holds exactly. The two tray lines that did not hold were mis-specified
+budgets, not regressions to chase, and are restated above as the measured floor.
 
 ## Error handling
 

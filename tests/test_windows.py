@@ -89,14 +89,22 @@ def test_group_ids_ignores_transients_of_other_windows():
 
 
 def test_an_excluded_window_named_in_recent_is_skipped():
-    """`recent` must be filtered through the candidate set, not trusted blindly."""
-    normal = win(1, wtype="_NET_WM_WINDOW_TYPE_NORMAL")
-    dialog = win(2, wtype="_NET_WM_WINDOW_TYPE_DIALOG")
-    assert choose([normal, dialog], "spotify", recent=(2, 1)).wid == 1
+    """`recent` must be filtered through the candidate set, not trusted blindly.
+
+    The EXCLUDED window deliberately has the LOWER id: with the ids the other
+    way round, an implementation that ignored recent/active_id/type-filtering
+    entirely and just returned the naive minimum id would pass by coincidence.
+    """
+    dialog = win(1, wtype="_NET_WM_WINDOW_TYPE_DIALOG")
+    normal = win(2, wtype="_NET_WM_WINDOW_TYPE_NORMAL")
+    assert choose([dialog, normal], "spotify", recent=(1, 2)).wid == 2
 
 
 def test_an_excluded_window_named_as_active_is_skipped():
-    """A dialog holding focus must not become the Dial's target window."""
-    normal = win(1, wtype="_NET_WM_WINDOW_TYPE_NORMAL")
-    dialog = win(2, wtype="_NET_WM_WINDOW_TYPE_DIALOG")
-    assert choose([normal, dialog], "spotify", active_id=2).wid == 1
+    """A dialog holding focus must not become the Dial's target window.
+
+    Excluded window at the LOWER id, for the same reason as above.
+    """
+    dialog = win(1, wtype="_NET_WM_WINDOW_TYPE_DIALOG")
+    normal = win(2, wtype="_NET_WM_WINDOW_TYPE_NORMAL")
+    assert choose([dialog, normal], "spotify", active_id=1).wid == 2

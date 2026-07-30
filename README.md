@@ -64,12 +64,18 @@ probe and gone by the next. An absent monitor falls back to primary.
 
 - `~/.config/systemd/user/dialsd.service`, `dials-tray.service`
 - `~/.local/share/dials/venv/`
-- `~/.config/dials/config.toml`
+- `~/.config/dials/config.toml` — seeded from the reference copy only if absent
 - `~/.local/state/dials/` (pause flag, tray PID)
 
 No apt packages, no dconf keys, no X keymap changes, no changes to Firefox's
-`profiles.ini`. `./uninstall.sh` reverses all of it; stopping the daemon releases
-every grab immediately.
+`profiles.ini`.
+
+`./uninstall.sh` stops and disables both units, deletes them, and removes the
+venv and `~/.local/state/dials/`. It deliberately **keeps
+`~/.config/dials/config.toml`** — that file is your configuration, not
+installer-owned state, so delete it by hand if you want it gone. Stopping the
+daemon releases every grab immediately, so the numpad is back to stock behaviour
+the moment the service stops, uninstalled or not.
 
 ## Resource footprint
 

@@ -21,6 +21,10 @@ print(f"  randr extension present: {bool(d.query_extension('RANDR'))}")
 ver = randr.query_version(d)
 print(f"  RandR version: {ver.major_version}.{ver.minor_version}")
 
+# NOTE: the recorded output of this line, `get_monitors: False`, reflects the
+# SYSTEM python-xlib 0.29 this probe was run against. The project venv installs
+# 0.33, where it reads True. RandR 1.2 is still the correct path: the dependency
+# floor is >=0.29, so 1.2 is the portable choice.
 print(f"  has get_monitors (RandR 1.5): {hasattr(randr, 'get_monitors')}")
 
 # RandR 1.2 path: screen resources -> outputs -> crtcs
