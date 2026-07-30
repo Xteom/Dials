@@ -83,8 +83,16 @@ def detail_lines(dial: Dial | None) -> list[str]:
 def run(config: Config) -> int:
     import curses
 
+    from dials.cli import _signal_daemon
     from dials.config import config_path
     from dials.configwrite import remove_dial, upsert_dial
+
+    # Every other writer signals the daemon after a write (cli unbind/capture,
+    # the confirm dialog, and the daemon's own in-process _persist). Without it
+    # the TUI - the editing surface the README points at - would be the one path
+    # that leaves the running daemon on a stale config: bind a window here,
+    # press its key, nothing happens. _signal_daemon swallows every failure and
+    # returns a bool, so calling it unconditionally is safe.
 
     def draw(stdscr, cfg, cursor, message):
         stdscr.erase()
@@ -193,12 +201,15 @@ def run(config: Config) -> int:
                         pin_geometry=cfg.defaults.pin_geometry,
                     )
                     cfg = upsert_dial(config_path(), dial)
+                    _signal_daemon()
                     message = f"bound {cursor} -> {dial.label}"
             elif key == ord("d") and cfg.dial(cursor):
                 cfg = remove_dial(config_path(), cursor)
+                _signal_daemon()
                 message = f"cleared {cursor}"
             elif key == ord("e") and cfg.dial(cursor):
                 cfg = upsert_dial(config_path(), cycle_focus_loss(cfg.dial(cursor)))
+                _signal_daemon()
                 message = f"on_focus_loss -> {cfg.dial(cursor).on_focus_loss}"
 
     import curses as _curses
