@@ -1,5 +1,5 @@
 from dials.geometry import Monitor, Rect
-from dials.monitors import RawOutput, dedupe_and_sort, pick
+from dials.monitors import MonitorSource, RawOutput, dedupe_and_sort, pick
 
 ROOT = Rect(0, 0, 3440, 2880)
 
@@ -92,3 +92,74 @@ def test_a_mirrored_pair_prefers_the_primary_output_name():
     assert len(mons) == 1
     assert mons[0].name == "ZZZ-9"
     assert mons[0].primary is True
+
+
+HDMI_RAW = RawOutput("HDMI-0", 63, 0, 0, 3440, 1440, False)
+EDP_RAW = RawOutput("eDP-1-1", 64, 388, 1440, 2560, 1440, True)
+
+
+class CountingReader:
+    """Stands in for the RandR query so cache behavior is testable without X."""
+
+    def __init__(self, outputs):
+        self.outputs = outputs
+        self.calls = 0
+
+    def __call__(self):
+        self.calls += 1
+        return list(self.outputs)
+
+
+def _source(reader):
+    return MonitorSource(display=None, root=None, reader=reader,
+                         root_rect_reader=lambda: Rect(0, 0, 3440, 2880))
+
+
+def test_monitors_are_cached_after_the_first_read():
+    reader = CountingReader([HDMI_RAW, EDP_RAW])
+    src = _source(reader)
+    assert len(src.monitors()) == 2
+    src.monitors()
+    src.monitors()
+    assert reader.calls == 1
+
+
+def test_invalidate_forces_exactly_one_more_read():
+    reader = CountingReader([HDMI_RAW, EDP_RAW])
+    src = _source(reader)
+    src.monitors()
+    src.invalidate()
+    src.monitors()
+    src.monitors()
+    assert reader.calls == 2
+
+
+def test_invalidation_picks_up_an_unplugged_monitor():
+    reader = CountingReader([HDMI_RAW, EDP_RAW])
+    src = _source(reader)
+    assert len(src.monitors()) == 2
+    reader.outputs = [HDMI_RAW]          # eDP unplugged
+    src.invalidate()
+    assert [m.name for m in src.monitors()] == ["HDMI-0"]
+
+
+def test_a_raising_reader_keeps_the_previous_cache():
+    reader = CountingReader([HDMI_RAW, EDP_RAW])
+    src = _source(reader)
+    good = src.monitors()
+
+    def boom():
+        raise RuntimeError("X went away")
+
+    src.reader = boom
+    src.invalidate()
+    assert src.monitors() == good
+
+
+def test_a_raising_reader_with_no_cache_yields_no_monitors():
+    def boom():
+        raise RuntimeError("X went away")
+
+    src = _source(boom)
+    assert src.monitors() == []
+    # pick() then degrades to the root box, which is its documented last resort.

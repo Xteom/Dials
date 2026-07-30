@@ -81,3 +81,108 @@ def pick(
         Monitor(name="<root>", rect=root_rect, primary=True, crtc=0),
         f"monitor {name!r} absent and no usable monitors; using root box",
     )
+
+
+class MonitorSource:
+    """Cached monitor list, invalidated by RandR events rather than polling.
+
+    Probe 06 confirmed `randr.select_input` is accepted for
+    RRScreenChangeNotify / RRCrtcChangeNotify / RROutputChangeNotify. That
+    proves the mask registers; that events actually arrive and invalidate this
+    cache is a live-hotplug smoke test, not a unit test.
+
+    `reader` and `root_rect_reader` are injected so the cache logic is testable
+    with no X server.
+    """
+
+    def __init__(self, display, root, reader=None, root_rect_reader=None):
+        self.display = display
+        self.root = root
+        self.reader = reader or self._read_from_x
+        self.root_rect_reader = root_rect_reader or self._read_root_rect_from_x
+        self._cache: list[Monitor] | None = None
+        # Survives invalidate() on purpose: it is the last SUCCESSFUL read, so a
+        # failed refresh can fall back to it. Without a second slot this is
+        # impossible - invalidate() has already cleared _cache by the time the
+        # reader raises, so there would be nothing left to keep.
+        self._last_good: list[Monitor] | None = None
+        self._root_rect: Rect | None = None
+
+    # ---- public API ------------------------------------------------------
+
+    def monitors(self) -> list[Monitor]:
+        if self._cache is None:
+            try:
+                self._cache = dedupe_and_sort(self.reader())
+                self._last_good = self._cache
+            except Exception:
+                # Degrade, never crash: reuse the last successful read. On a
+                # cold cache this yields [], and pick() falls back to the root
+                # box.
+                self._cache = (
+                    self._last_good if self._last_good is not None else []
+                )
+        return self._cache
+
+    def root_rect(self) -> Rect:
+        if self._root_rect is None:
+            try:
+                self._root_rect = self.root_rect_reader()
+            except Exception:
+                self._root_rect = Rect(0, 0, 1920, 1080)
+        return self._root_rect
+
+    def invalidate(self) -> None:
+        # _last_good is deliberately NOT cleared - see __init__.
+        self._cache = None
+        self._root_rect = None
+
+    def select_events(self) -> None:
+        """Subscribe to RandR change notifications. Best-effort."""
+        from Xlib.ext import randr
+        try:
+            randr.select_input(
+                self.root,
+                randr.RRScreenChangeNotifyMask
+                | randr.RRCrtcChangeNotifyMask
+                | randr.RROutputChangeNotifyMask,
+            )
+            self.display.sync()
+        except Exception:
+            pass
+
+    def handles(self, event) -> bool:
+        """True if `event` is a RandR change that should drop the cache."""
+        from Xlib.ext import randr
+        base = getattr(self, "_randr_base", None)
+        if base is None:
+            info = self.display.query_extension("RANDR")
+            base = self._randr_base = info.first_event if info else -1
+        return base >= 0 and event.type in (
+            base + randr.RRScreenChangeNotify,
+            base + randr.RRNotify,
+        )
+
+    # ---- X I/O -----------------------------------------------------------
+
+    def _read_from_x(self) -> list[RawOutput]:
+        from Xlib.ext import randr
+        res = randr.get_screen_resources(self.root)
+        primary = randr.get_output_primary(self.root).output
+        out: list[RawOutput] = []
+        for oid in res.outputs:
+            info = randr.get_output_info(self.display, oid, res.config_timestamp)
+            if info.crtc == 0:
+                out.append(RawOutput(info.name, 0, 0, 0, 0, 0, False))
+                continue
+            crtc = randr.get_crtc_info(self.display, info.crtc, res.config_timestamp)
+            out.append(RawOutput(
+                name=info.name, crtc=info.crtc,
+                x=crtc.x, y=crtc.y, w=crtc.width, h=crtc.height,
+                primary=(oid == primary),
+            ))
+        return out
+
+    def _read_root_rect_from_x(self) -> Rect:
+        g = self.root.get_geometry()
+        return Rect(0, 0, g.width, g.height)
