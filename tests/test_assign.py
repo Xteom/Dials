@@ -58,6 +58,20 @@ def test_derive_rect_never_returns_zero_size():
     assert fr[2] > 0.0 and fr[3] > 0.0
 
 
+@pytest.mark.parametrize("win_rect", [
+    Rect(3440, 0, 800, 600),      # x exactly at the monitor's right edge
+    Rect(4000, 200, 800, 600),    # x well past it
+    Rect(0, 1440, 800, 600),      # y past the bottom edge
+])
+def test_derive_rect_never_starts_past_the_monitor_edge(win_rect):
+    """A capture with no overlap must still yield a rect that fits."""
+    fx, fy, fw, fh = derive_rect(win_rect, HDMI)
+    assert all(0.0 <= v <= 1.0 for v in (fx, fy, fw, fh))
+    assert fw > 0.0 and fh > 0.0
+    assert fx + fw <= 1.0, f"rect starts past the right edge: {fx} + {fw}"
+    assert fy + fh <= 1.0, f"rect starts past the bottom edge: {fy} + {fh}"
+
+
 # ---- arming -------------------------------------------------------------
 
 def test_not_armed_initially():
@@ -75,13 +89,16 @@ def test_arm_notifies_and_sets_a_deadline():
     assert "Assign" in notifier.messages[0][0]
 
 
-def test_capture_is_snapshotted_so_later_focus_changes_are_irrelevant():
-    """The dialog itself takes focus; that must not change what gets bound."""
+def test_resolve_uses_every_field_from_the_snapshot():
+    """The snapshot is authoritative: monitor and rect come from it, not defaults."""
     m = mode()
-    snap = capture(wid=0x600001, cls="slack")
-    m.arm(snap)
-    result = m.resolve("4", existing=None)
-    assert result.match_class == "slack"
+    m.arm(Capture(wid=0x600001, wm_class="slack", label="Slack",
+                  monitor="DP-9", rect=(0.25, 0.5, 0.25, 0.5), at=0.0))
+    dial = m.resolve("4", existing=None)
+    assert dial.match_class == "slack"
+    assert dial.label == "Slack"
+    assert dial.monitor == "DP-9"          # NOT the Defaults monitor
+    assert dial.rect == (0.25, 0.5, 0.25, 0.5)
 
 
 def test_resolve_on_an_empty_slot_returns_a_dial():
@@ -102,12 +119,18 @@ def test_resolve_on_an_occupied_slot_returns_an_overwrite_request():
     assert result.incoming.match_class == "slack"
 
 
-def test_an_overwrite_request_writes_nothing_yet():
+def test_an_overwrite_request_carries_both_sides_and_disarms():
+    """Nothing is persisted; the caller gets both sides and the capture is spent."""
     m = mode()
-    m.arm(capture())
-    result = m.resolve("4", existing=existing_dial())
-    # The caller must confirm before persisting; resolve only describes.
-    assert isinstance(result, OverwriteRequest)
+    m.arm(capture(cls="slack", label="Slack"))
+    req = m.resolve("4", existing=existing_dial(slot="4", cls="spotify"))
+    assert req.existing.match_class == "spotify"
+    assert req.existing.slot == "4"
+    assert req.incoming.match_class == "slack"
+    assert req.incoming.slot == "4"
+    assert m.armed is False              # capture consumed on this path too
+    with pytest.raises(AssignError):     # cannot be re-resolved
+        m.resolve("4", existing=None)
 
 
 def test_resolve_when_not_armed_raises():
@@ -120,6 +143,14 @@ def test_resolve_rejects_the_reserved_slot():
     m.arm(capture())
     with pytest.raises(AssignError, match="reserved"):
         m.resolve(".", existing=None)
+
+
+@pytest.mark.parametrize("slot", ["99", "z", "", "F1"])
+def test_resolve_rejects_a_non_bindable_slot(slot):
+    m = mode()
+    m.arm(capture())
+    with pytest.raises(AssignError, match="bindable"):
+        m.resolve(slot, existing=None)
 
 
 def test_resolve_rejects_an_empty_captured_class():

@@ -22,6 +22,10 @@ from dials.geometry import Monitor, Rect
 
 ASSIGN_TIMEOUT = 5.0
 
+#: Smallest fraction a captured rect may occupy. Config validation rejects a
+#: zero-sized rect, so a degenerate capture is floored to this rather than 0.
+MIN_FRACTION = 0.001
+
 
 class AssignError(ValueError):
     """Raised when a capture cannot become a Dial."""
@@ -51,13 +55,21 @@ def derive_rect(win_rect: Rect, monitor: Monitor) -> tuple[float, float, float, 
     fw = win_rect.w / m.w if m.w else 1.0
     fh = win_rect.h / m.h if m.h else 1.0
 
-    fx = min(max(fx, 0.0), 1.0)
-    fy = min(max(fy, 0.0), 1.0)
-    # Keep the rect inside the monitor and never zero-sized, since config
-    # validation rejects both.
-    fw = min(max(fw, 0.001), 1.0 - fx if fx < 1.0 else 0.001)
-    fh = min(max(fh, 0.001), 1.0 - fy if fy < 1.0 else 0.001)
-    return (round(fx, 4), round(fy, 4), round(fw, 4), round(fh, 4))
+    # Clamp the ORIGIN so a minimum-sized rect always fits. Letting fx reach
+    # exactly 1.0 leaves no room, and an `else MIN_FRACTION` fallback on the
+    # width would then yield fx + fw == 1.001 - a rect starting past the
+    # monitor's right edge. Every individual value would still sit inside
+    # 0.0..1.0, so config validation (which checks each value independently)
+    # would not catch it. Reachable whenever the captured window has no overlap
+    # with the monitor it is assigned to.
+    #
+    # fx is rounded BEFORE deriving fw's cap, so `1.0 - fx` is already exact at
+    # 4dp and rounding fw cannot push the sum back over 1.0.
+    fx = round(min(max(fx, 0.0), 1.0 - MIN_FRACTION), 4)
+    fy = round(min(max(fy, 0.0), 1.0 - MIN_FRACTION), 4)
+    fw = round(min(max(fw, MIN_FRACTION), 1.0 - fx), 4)
+    fh = round(min(max(fh, MIN_FRACTION), 1.0 - fy), 4)
+    return (fx, fy, fw, fh)
 
 
 class AssignMode:
