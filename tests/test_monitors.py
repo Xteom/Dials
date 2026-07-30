@@ -69,3 +69,26 @@ def test_pick_returns_a_monitor_type_in_every_branch():
     for mons in ([], dedupe_and_sort([HDMI])):
         chosen, _ = pick("nope", mons, ROOT)
         assert isinstance(chosen, Monitor)
+
+
+def test_ordering_is_by_position_not_by_name():
+    """Name order and position order deliberately disagree here.
+
+    A regression that sorted by name alone would return the reverse, so this
+    pins the sort key to position-first rather than merely 'sorted somehow'.
+    """
+    # "DP-9" sorts BEFORE "HDMI-0" by name, but sits to its RIGHT on screen.
+    left = RawOutput("HDMI-0", crtc=63, x=0, y=0, w=1920, h=1080, primary=False)
+    right = RawOutput("DP-9", crtc=64, x=1920, y=0, w=1920, h=1080, primary=False)
+    assert [m.name for m in dedupe_and_sort([left, right])] == ["HDMI-0", "DP-9"]
+    assert [m.name for m in dedupe_and_sort([right, left])] == ["HDMI-0", "DP-9"]
+
+
+def test_a_mirrored_pair_prefers_the_primary_output_name():
+    """When two outputs share a CRTC, the primary one's name should win."""
+    secondary = RawOutput("AAA-0", crtc=63, x=0, y=0, w=1920, h=1080, primary=False)
+    primary = RawOutput("ZZZ-9", crtc=63, x=0, y=0, w=1920, h=1080, primary=True)
+    mons = dedupe_and_sort([secondary, primary])
+    assert len(mons) == 1
+    assert mons[0].name == "ZZZ-9"
+    assert mons[0].primary is True
