@@ -48,6 +48,36 @@ def test_desktop_icon_name_matches_on_startupwmclass(tmp_path):
     assert desktop_icon_name("spotify", search_dirs=[tmp_path]) == "spotify-linux-128"
 
 
+def test_startupwmclass_beats_a_filename_match_scanned_earlier(tmp_path):
+    """A filename hit must not pre-empt a StartupWMClass hit in a later file.
+
+    Files are scanned in sorted() order, so `myapp.desktop` (filename match) is
+    seen BEFORE `zz-other.desktop` (StartupWMClass match). If the filename hit
+    returned early instead of only setting the fallback, this would return
+    "filename-icon".
+    """
+    (tmp_path / "myapp.desktop").write_text(
+        "[Desktop Entry]\nName=My App\nIcon=filename-icon\nExec=myapp\n"
+    )
+    (tmp_path / "zz-other.desktop").write_text(
+        "[Desktop Entry]\nName=Other\nIcon=startupwmclass-icon\n"
+        "StartupWMClass=myapp\nExec=other\n"
+    )
+    assert desktop_icon_name("myapp", search_dirs=[tmp_path]) == "startupwmclass-icon"
+
+
+def test_a_filename_match_is_used_when_no_startupwmclass_matches(tmp_path):
+    """The fallback must still win when nothing declares a matching class."""
+    (tmp_path / "myapp.desktop").write_text(
+        "[Desktop Entry]\nName=My App\nIcon=filename-icon\nExec=myapp\n"
+    )
+    (tmp_path / "zz-other.desktop").write_text(
+        "[Desktop Entry]\nName=Other\nIcon=other-icon\n"
+        "StartupWMClass=somethingelse\nExec=other\n"
+    )
+    assert desktop_icon_name("myapp", search_dirs=[tmp_path]) == "filename-icon"
+
+
 def test_desktop_icon_name_returns_empty_when_nothing_matches(tmp_path):
     assert desktop_icon_name("nope", search_dirs=[tmp_path]) == ""
 
