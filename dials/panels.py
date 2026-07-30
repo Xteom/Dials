@@ -1,8 +1,8 @@
 """Dial decision logic. Pure: no X, no config, no I/O.
 
 Two pieces live here. `decide` is the three-state action table driven by a
-keypress. `FocusTracker` (added in the next task) models the asynchronous
-activation lifecycle, because activation is a request the WM may refuse.
+keypress. `FocusTracker` models the asynchronous activation lifecycle,
+because activation is a request the WM may refuse.
 
 "is_active" always means "this window is _NET_ACTIVE_WINDOW", never
 _NET_WM_STATE_FOCUSED. EWMH defines FOCUSED as whether decorations are drawn

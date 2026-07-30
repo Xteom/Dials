@@ -86,3 +86,17 @@ def test_group_ids_ignores_transients_of_other_windows():
     chosen = win(5)
     other_dialog = win(6, wtype="_NET_WM_WINDOW_TYPE_DIALOG", transient=8)
     assert group_ids(chosen, [chosen, other_dialog]) == {5}
+
+
+def test_an_excluded_window_named_in_recent_is_skipped():
+    """`recent` must be filtered through the candidate set, not trusted blindly."""
+    normal = win(1, wtype="_NET_WM_WINDOW_TYPE_NORMAL")
+    dialog = win(2, wtype="_NET_WM_WINDOW_TYPE_DIALOG")
+    assert choose([normal, dialog], "spotify", recent=(2, 1)).wid == 1
+
+
+def test_an_excluded_window_named_as_active_is_skipped():
+    """A dialog holding focus must not become the Dial's target window."""
+    normal = win(1, wtype="_NET_WM_WINDOW_TYPE_NORMAL")
+    dialog = win(2, wtype="_NET_WM_WINDOW_TYPE_DIALOG")
+    assert choose([normal, dialog], "spotify", active_id=2).wid == 1

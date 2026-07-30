@@ -104,16 +104,43 @@ def _focus_loss(value, where: str) -> str:
     return value
 
 
+def _bool(value, field: str, where: str) -> bool:
+    # bool must be checked explicitly and BEFORE any numeric reasoning:
+    # isinstance(True, int) is True in Python, so an int check alone would
+    # accept 0/1 as booleans, and a naive "reject ints" rule would wrongly
+    # reject real booleans too.
+    if not isinstance(value, bool):
+        raise ConfigError(
+            f"{where}: {field}={value!r} must be a boolean, not "
+            f"{type(value).__name__}"
+        )
+    return value
+
+
+def _str(value, field: str, where: str) -> str:
+    # bool is checked first for the same reason as in `_bool`: isinstance(x,
+    # str) already excludes bool on its own, but staying explicit keeps this
+    # symmetric with `_bool` and the error message honest about the type.
+    if isinstance(value, bool) or not isinstance(value, str):
+        raise ConfigError(
+            f"{where}: {field}={value!r} must be a string, not "
+            f"{type(value).__name__}"
+        )
+    return value
+
+
 def _defaults(raw: dict) -> Defaults:
     base = Defaults()
     return replace(
         base,
-        monitor=str(raw.get("monitor", base.monitor)),
+        monitor=_str(raw.get("monitor", base.monitor), "monitor", "defaults"),
         rect=_rect(raw.get("rect", list(base.rect)), "defaults"),
         on_focus_loss=_focus_loss(
             raw.get("on_focus_loss", base.on_focus_loss), "defaults"
         ),
-        pin_geometry=bool(raw.get("pin_geometry", base.pin_geometry)),
+        pin_geometry=_bool(
+            raw.get("pin_geometry", base.pin_geometry), "pin_geometry", "defaults"
+        ),
     )
 
 
@@ -126,22 +153,42 @@ def _dial(slot: str, raw: dict, defaults: Defaults) -> Dial:
     if not keys.is_bindable(slot):
         raise ConfigError(f"{where}: not a bindable slot")
 
-    match_class = str(raw.get("match_class", "")).strip()
+    match_class = _str(raw.get("match_class", ""), "match_class", where).strip()
     if not match_class:
         raise ConfigError(f"{where}: match_class is required and cannot be empty")
 
+    # label falls back to match_class when absent or explicitly empty, but a
+    # PRESENT value of the wrong type (42, true, [...]) is never silently
+    # coerced - only None/"" are treated as "not given".
+    label_raw = raw.get("label")
+    if label_raw is None or label_raw == "":
+        label = match_class
+    else:
+        label = _str(label_raw, "label", where)
+
+    # launch may legitimately be absent (None/""); that is not the same as
+    # wrong-typed, so only None/"" fall back to None. Anything else must be a
+    # real string.
+    launch_raw = raw.get("launch")
+    if launch_raw is None or launch_raw == "":
+        launch = None
+    else:
+        launch = _str(launch_raw, "launch", where)
+
     return Dial(
         slot=slot,
-        label=str(raw.get("label") or match_class),
+        label=label,
         match_class=match_class,
-        launch=(str(raw["launch"]) if raw.get("launch") else None),
-        icon=str(raw.get("icon", "")),
-        monitor=str(raw.get("monitor", defaults.monitor)),
+        launch=launch,
+        icon=_str(raw.get("icon", ""), "icon", where),
+        monitor=_str(raw.get("monitor", defaults.monitor), "monitor", where),
         rect=_rect(raw.get("rect", list(defaults.rect)), where),
         on_focus_loss=_focus_loss(
             raw.get("on_focus_loss", defaults.on_focus_loss), where
         ),
-        pin_geometry=bool(raw.get("pin_geometry", defaults.pin_geometry)),
+        pin_geometry=_bool(
+            raw.get("pin_geometry", defaults.pin_geometry), "pin_geometry", where
+        ),
     )
 
 

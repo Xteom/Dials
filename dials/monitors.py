@@ -6,8 +6,8 @@ mirrored outputs share a CRTC and must be deduplicated to avoid reporting two
 monitors with identical rects.
 
 This module is split: the functions below are pure and fully unit-tested; the
-X I/O lives in `MonitorSource` (added in the next task) and simply produces
-`RawOutput` records for them.
+X I/O lives in `MonitorSource` and simply produces `RawOutput` records for
+them.
 """
 from __future__ import annotations
 

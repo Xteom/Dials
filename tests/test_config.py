@@ -112,3 +112,85 @@ def test_xdg_paths_respect_environment(monkeypatch, tmp_path):
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
     assert config.config_path() == tmp_path / "cfg" / "dials" / "config.toml"
     assert config.state_dir() == tmp_path / "state" / "dials"
+
+
+# ---- strict type validation (Item 1, task 11b) ----------------------------
+
+
+def test_rejects_pin_geometry_as_a_quoted_string_in_a_dial():
+    # bool("false") is True; a quoted boolean must never be silently coerced.
+    with pytest.raises(ConfigError, match="pin_geometry"):
+        loads('[dials."9"]\nlabel="x"\nmatch_class="x"\npin_geometry="false"\n')
+
+
+def test_rejects_pin_geometry_as_an_int_in_a_dial():
+    # isinstance(True, int) is True in Python, so this must be checked
+    # explicitly rather than falling out of a numeric check.
+    with pytest.raises(ConfigError, match="pin_geometry"):
+        loads('[dials."9"]\nlabel="x"\nmatch_class="x"\npin_geometry=1\n')
+
+
+def test_accepts_pin_geometry_as_a_real_bool_in_a_dial():
+    d = loads('[dials."9"]\nlabel="x"\nmatch_class="x"\npin_geometry=true\n').dial("9")
+    assert d.pin_geometry is True
+
+
+def test_rejects_pin_geometry_as_a_quoted_string_in_defaults():
+    with pytest.raises(ConfigError, match="pin_geometry"):
+        loads('[defaults]\npin_geometry="false"\n')
+
+
+def test_rejects_pin_geometry_as_an_int_in_defaults():
+    with pytest.raises(ConfigError, match="pin_geometry"):
+        loads('[defaults]\npin_geometry=1\n')
+
+
+def test_accepts_pin_geometry_as_a_real_bool_in_defaults():
+    cfg = loads('[defaults]\npin_geometry=true\n')
+    assert cfg.defaults.pin_geometry is True
+
+
+def test_rejects_a_non_string_match_class():
+    with pytest.raises(ConfigError, match="match_class"):
+        loads('[dials."9"]\nlabel="x"\nmatch_class=42\n')
+
+
+def test_rejects_a_non_string_monitor_in_a_dial():
+    with pytest.raises(ConfigError, match="monitor"):
+        loads('[dials."9"]\nlabel="x"\nmatch_class="x"\nmonitor=42\n')
+
+
+def test_rejects_a_non_string_monitor_in_defaults():
+    with pytest.raises(ConfigError, match="monitor"):
+        loads('[defaults]\nmonitor=42\n')
+
+
+def test_rejects_a_non_string_label():
+    with pytest.raises(ConfigError, match="label"):
+        loads('[dials."9"]\nlabel=42\nmatch_class="x"\n')
+
+
+def test_rejects_a_non_string_icon():
+    with pytest.raises(ConfigError, match="icon"):
+        loads('[dials."9"]\nlabel="x"\nmatch_class="x"\nicon=42\n')
+
+
+def test_rejects_a_non_string_launch():
+    with pytest.raises(ConfigError, match="launch"):
+        loads('[dials."9"]\nlabel="x"\nmatch_class="x"\nlaunch=42\n')
+
+
+def test_launch_absent_is_still_fine():
+    # Absent is not the same as wrong-typed: this must keep working.
+    d = loads('[dials."9"]\nlabel="x"\nmatch_class="x"\n').dial("9")
+    assert d.launch is None
+
+
+def test_rejects_a_boolean_match_class():
+    with pytest.raises(ConfigError, match="match_class"):
+        loads('[dials."9"]\nlabel="x"\nmatch_class=true\n')
+
+
+def test_rejects_a_list_monitor():
+    with pytest.raises(ConfigError, match="monitor"):
+        loads('[dials."9"]\nlabel="x"\nmatch_class="x"\nmonitor=["a"]\n')
