@@ -1,8 +1,8 @@
 import pytest
 
 from dials.tray import (
-    DORMANT, ICON_NAMES, LIVE, PAUSED, POLL_INTERVAL_MS, TOOLTIPS, icon_state,
-    numlock_on,
+    DORMANT, ICON_NAMES, LIVE, PAUSED, POLL_INTERVAL_MS, TOOLTIPS,
+    _daemon_running, icon_state, numlock_on,
 )
 
 
@@ -67,3 +67,82 @@ def test_numlock_degrades_to_false_when_x_fails():
             raise RuntimeError("no display")
 
     assert numlock_on(Broken()) is False
+
+
+# ---- _daemon_running: cached-PID liveness check (Round 1 fix) ------------
+#
+# A `pgrep -x dialsd` fork per tick was measured at 17570.7us against a
+# 23.2us led_mask read - 756x the cost the polling budget was justified by.
+# These tests assert the cache actually avoids that cost in steady state,
+# not just that the end result is correct.
+
+def test_daemon_running_uses_the_cached_pid_without_rescanning():
+    cache = {"pid": 123}
+    scan_calls = []
+
+    def list_pids():
+        scan_calls.append(1)
+        return []
+
+    def read_comm(pid):
+        assert pid == 123
+        return "dialsd"
+
+    assert _daemon_running(cache, list_pids=list_pids, read_comm=read_comm) is True
+    assert scan_calls == []          # the whole point: no rescan in steady state
+    assert cache["pid"] == 123
+
+
+def test_daemon_running_rescans_when_the_cached_pid_comm_changes():
+    cache = {"pid": 123}
+    comms = {123: "bash", 456: "dialsd"}
+
+    def list_pids():
+        return [123, 456]
+
+    def read_comm(pid):
+        return comms[pid]
+
+    assert _daemon_running(cache, list_pids=list_pids, read_comm=read_comm) is True
+    assert cache["pid"] == 456
+
+
+def test_daemon_running_rescans_when_the_cached_pid_has_vanished():
+    cache = {"pid": 123}
+
+    def list_pids():
+        return [789]
+
+    def read_comm(pid):
+        if pid == 123:
+            raise OSError("no such process")
+        return "dialsd" if pid == 789 else "other"
+
+    assert _daemon_running(cache, list_pids=list_pids, read_comm=read_comm) is True
+    assert cache["pid"] == 789
+
+
+def test_daemon_running_is_false_when_no_process_matches():
+    cache = {"pid": None}
+
+    def list_pids():
+        return [1, 2, 3]
+
+    def read_comm(pid):
+        return "other"
+
+    assert _daemon_running(cache, list_pids=list_pids, read_comm=read_comm) is False
+    assert cache["pid"] is None
+
+
+def test_daemon_running_is_false_when_the_reader_raises():
+    cache = {"pid": None}
+
+    def list_pids():
+        return [1, 2, 3]
+
+    def read_comm(pid):
+        raise PermissionError("no access")
+
+    assert _daemon_running(cache, list_pids=list_pids, read_comm=read_comm) is False
+    assert cache["pid"] is None
