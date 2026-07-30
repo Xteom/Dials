@@ -166,6 +166,11 @@ class WindowOps:
         now = time.monotonic()
         out: list[WindowInfo] = []
         for wid in ids:
+            # Register first-seen BEFORE any property read: a transient read
+            # failure must never reset a window's identity age, or
+            # choose(since=) could adopt a pre-existing window as a freshly
+            # launched one.
+            self._first_seen.setdefault(wid, now)
             try:
                 w = self._win(wid)
                 cls = w.get_wm_class()
@@ -176,10 +181,9 @@ class WindowOps:
                     "_NET_WM_WINDOW_TYPE_NORMAL"
             except Exception:
                 # Routine: the window can have disappeared mid-enumeration.
-                log.debug("failed to read window %#x during list_windows", wid,
+                log.debug("could not read properties of window %#x", wid,
                           exc_info=True)
                 continue
-            self._first_seen.setdefault(wid, now)
             out.append(WindowInfo(
                 wid=wid,
                 wm_class=(cls[1] if cls and len(cls) > 1 else ""),
@@ -188,7 +192,11 @@ class WindowOps:
                 transient_for=(transient.value[0] if transient else None),
                 appeared=self._first_seen[wid],
             ))
-        live = {w.wid for w in out}
+        # Prune against the WM's own client list, not against windows we
+        # could successfully read this scan - otherwise a transient read
+        # failure would delete the entry outright (see above), which is
+        # exactly as bad as resetting it.
+        live = set(ids)
         for gone in [k for k in self._first_seen if k not in live]:
             del self._first_seen[gone]
         return out

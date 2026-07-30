@@ -60,6 +60,40 @@ def ops():
     return WindowOps(d, FakeRoot(d)), d
 
 
+class _Prop:
+    """A get_full_property() result: just needs a `.value`."""
+    def __init__(self, value):
+        self.value = value
+
+
+class _FlakyWindow:
+    """A managed window whose property reads can be told to fail on demand -
+    simulates a transient X error while the window stays in _NET_CLIENT_LIST
+    throughout, for list_windows()'s first-seen bookkeeping tests."""
+
+    def __init__(self, wid):
+        self.id = wid
+        self.fail = False
+
+    def get_wm_class(self):
+        if self.fail:
+            raise RuntimeError("x server hiccup")
+        return ("instance", "cls")
+
+    def get_attributes(self):
+        if self.fail:
+            raise RuntimeError("x server hiccup")
+
+        class Attrs:
+            override_redirect = False
+        return Attrs()
+
+    def get_full_property(self, atom, prop_type):
+        if self.fail:
+            raise RuntimeError("x server hiccup")
+        return None
+
+
 def test_panel_hints_are_the_three_unconditional_ones():
     """ABOVE is deliberately NOT here - it is conditional on on_focus_loss."""
     assert PANEL_HINTS == (
@@ -155,3 +189,51 @@ def test_a_failing_client_message_is_logged_and_swallowed(caplog):
 
     assert any("500001" in r.getMessage() or "client message" in r.getMessage()
                for r in caplog.records), "no diagnostic was logged"
+
+
+def test_a_transient_read_failure_does_not_reset_a_windows_appeared_time():
+    """choose(since=) relies on appeared times being stable identity, not
+    liveness. A window that is still in _NET_CLIENT_LIST but whose property
+    reads happen to fail on one scan must not look freshly-appeared on the
+    next successful scan."""
+    WID = 0x500002
+    o, d = ops()
+
+    root_win = _FlakyWindow(o.root.id)
+    root_win.get_full_property = lambda atom, prop_type: _Prop([WID])
+    d.windows[o.root.id] = root_win
+
+    target = _FlakyWindow(WID)
+    target.fail = True
+    d.windows[WID] = target
+
+    # scan 1: this window's property reads fail, but it IS in _NET_CLIENT_LIST
+    o.list_windows()
+    first = o._first_seen.get(WID)
+    assert first is not None, "window must be registered even when its props fail"
+
+    # scan 2: reads now succeed
+    target.fail = False
+    o.list_windows()
+    assert o._first_seen[WID] == first, "appeared time was reset by a failed read"
+
+
+def test_list_windows_prunes_first_seen_for_windows_that_left_the_client_list():
+    """The other half of the same invariant: _first_seen must not grow
+    without bound in a long-running daemon, so a window that genuinely
+    leaves _NET_CLIENT_LIST still needs to be pruned."""
+    WID = 0x500003
+    o, d = ops()
+
+    root_win = _FlakyWindow(o.root.id)
+    root_win.get_full_property = lambda atom, prop_type: _Prop([WID])
+    d.windows[o.root.id] = root_win
+    d.windows[WID] = _FlakyWindow(WID)
+
+    o.list_windows()
+    assert WID in o._first_seen
+
+    root_win.get_full_property = lambda atom, prop_type: _Prop([])
+    o.list_windows()
+    assert WID not in o._first_seen, \
+        "a window that left _NET_CLIENT_LIST must be pruned"
