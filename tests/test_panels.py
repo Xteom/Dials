@@ -1,6 +1,9 @@
 import pytest
 
 from dials.panels import HIDE, LAUNCH, RAISE, SHOW, decide, reapply_geometry
+from dials.panels import (
+    ACTIVATING, ACTIVATION_TIMEOUT, ACTIVE, HIDE, INACTIVE, FocusTracker,
+)
 
 
 @pytest.mark.parametrize("found,hidden,is_active,expected", [
@@ -40,3 +43,123 @@ def test_pin_geometry_opts_a_dial_into_strict_enforcement_on_raise():
 def test_geometry_is_never_applied_on_hide_or_launch():
     for action in (HIDE, LAUNCH):
         assert reapply_geometry(action, pin_geometry=True) is False
+
+
+WIN = 0x600001
+OTHER = 0x700001
+
+
+def tracker(mode="hide", clock=None):
+    from tests.conftest import FakeClock
+    return FocusTracker(on_focus_loss=mode, clock=clock or FakeClock())
+
+
+def test_starts_inactive():
+    assert tracker().state == INACTIVE
+
+
+def test_activating_then_observed_becomes_active():
+    t = tracker()
+    t.activating(WIN)
+    assert t.state == ACTIVATING
+    assert t.observe_active(WIN, {WIN}) is None
+    assert t.state == ACTIVE
+
+
+def test_does_not_hide_itself_during_its_own_show_sequence():
+    """The race: focus moves transiently between geometry and activation."""
+    t = tracker()
+    t.activating(WIN)
+    # Some other window is briefly active before ours lands.
+    assert t.observe_active(OTHER, {WIN}) is None
+    assert t.state == ACTIVATING          # guard has NOT armed
+
+
+def test_hides_only_after_having_been_observed_active():
+    t = tracker()
+    t.activating(WIN)
+    t.observe_active(WIN, {WIN})          # arms here, and only here
+    assert t.observe_active(OTHER, {WIN}) == HIDE
+    assert t.state == INACTIVE
+
+
+def test_a_transient_of_the_dial_counts_as_still_active():
+    # A Dial must not hide itself when its own dialog takes focus.
+    t = tracker()
+    t.activating(WIN)
+    t.observe_active(WIN, {WIN})
+    dialog = 0x800001
+    assert t.observe_active(dialog, {WIN, dialog}) is None
+    assert t.state == ACTIVE
+
+
+def test_normal_mode_never_asks_to_hide():
+    t = tracker("normal")
+    t.activating(WIN)
+    t.observe_active(WIN, {WIN})
+    assert t.observe_active(OTHER, {WIN}) is None
+
+
+def test_above_mode_never_asks_to_hide():
+    t = tracker("above")
+    t.activating(WIN)
+    t.observe_active(WIN, {WIN})
+    assert t.observe_active(OTHER, {WIN}) is None
+
+
+def test_activation_timeout_returns_to_inactive_without_hiding():
+    from tests.conftest import FakeClock
+    c = FakeClock()
+    t = tracker(clock=c)
+    t.activating(WIN)
+    c.advance(ACTIVATION_TIMEOUT + 0.1)
+    assert t.check_timeout() is True       # refused or lost
+    assert t.state == INACTIVE
+
+
+def test_no_timeout_while_still_within_the_window():
+    from tests.conftest import FakeClock
+    c = FakeClock()
+    t = tracker(clock=c)
+    t.activating(WIN)
+    c.advance(ACTIVATION_TIMEOUT / 2)
+    assert t.check_timeout() is False
+    assert t.state == ACTIVATING
+
+
+def test_deadline_is_none_unless_activating():
+    """This is what keeps the daemon's select() timeout infinite at idle."""
+    from tests.conftest import FakeClock
+    c = FakeClock()
+    t = tracker(clock=c)
+    assert t.deadline() is None
+    t.activating(WIN)
+    assert t.deadline() == c.t + ACTIVATION_TIMEOUT
+    t.observe_active(WIN, {WIN})
+    assert t.deadline() is None
+
+
+def test_a_second_activation_supersedes_the_first():
+    t = tracker()
+    t.activating(WIN)
+    t.activating(OTHER)                    # rapid second press
+    assert t.observe_active(OTHER, {OTHER}) is None
+    assert t.state == ACTIVE
+
+
+def test_forget_resets_for_config_reload_mid_transition():
+    t = tracker()
+    t.activating(WIN)
+    t.forget()
+    assert t.state == INACTIVE
+    # A late event for the abandoned window must not drive a transition.
+    assert t.observe_active(OTHER, {WIN}) is None
+
+
+def test_repeated_identical_active_events_are_idempotent():
+    t = tracker()
+    t.activating(WIN)
+    t.observe_active(WIN, {WIN})
+    for _ in range(3):
+        assert t.observe_active(WIN, {WIN}) is None
+    assert t.state == ACTIVE
