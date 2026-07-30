@@ -1,0 +1,20 @@
+[Unit]
+Description=Dials - numpad window panels
+Documentation=https://github.com/Xteom/Dials
+PartOf=graphical-session.target
+After=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/share/dials/venv/bin/dialsd
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+RestartSec=2
+# Guard rails, not the plan: the budget is 0.0% CPU and <=16MB RSS at idle.
+# A daemon that needs these has already regressed.
+MemoryMax=64M
+CPUQuota=5%
+Nice=5
+
+[Install]
+WantedBy=graphical-session.target
