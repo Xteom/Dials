@@ -130,10 +130,26 @@ class GrabManager:
 
 
 def _keysym_name(display, keycode: int) -> str:
+    """Resolve a keycode to a keysym NAME.
+
+    `_XK_NAME` is consulted FIRST and is authoritative for lock keys.
+    `XK.keysym_to_string` handles only Latin-1 and actively MIS-reports some
+    keysyms rather than returning None: it treats any keysym in 0x00-0xff as
+    a raw Latin-1 code point, so `Scroll_Lock` (0xFF14) comes back as '\\x14'
+    and NoSymbol (0) comes back as '\\x00' - both truthy strings that would
+    otherwise shadow the table or produce a bogus name for an unmapped key.
+    Ordering the table first, and treating keysym 0 as "no name", avoids both
+    traps: getting Scroll_Lock wrong here would silently drop its modifier
+    from the tolerated set and kill every Dial whenever ScrollLock was on -
+    the same silent failure this whole module exists to prevent, just for a
+    different lock key.
+    """
     from Xlib import XK
     try:
-        return XK.keysym_to_string(display.keycode_to_keysym(keycode, 0)) or \
-            _XK_NAME.get(display.keycode_to_keysym(keycode, 0), "")
+        ks = display.keycode_to_keysym(keycode, 0)
+        if not ks:
+            return ""
+        return _XK_NAME.get(ks) or XK.keysym_to_string(ks) or ""
     except Exception:
         return ""
 

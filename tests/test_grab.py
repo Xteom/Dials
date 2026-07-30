@@ -148,3 +148,43 @@ def test_remove_all_releases_everything_and_clears_active(monkeypatch):
     gm.remove_all()
     assert sorted(root.ungrabs) == sorted([(81, 0), (81, X.LockMask)])
     assert gm.active is False
+
+
+REAL_KEYSYMS = {77: 0xFF7F, 66: 0xFFE5, 78: 0xFF14, 79: 0xFFE6}
+
+
+class KeysymDisplay:
+    """Returns real X keysym constants, unlike FakeDisplay's raw-keycode stub."""
+
+    def __init__(self, mapping):
+        self.mapping = mapping
+
+    def keycode_to_keysym(self, keycode, index):
+        return self.mapping.get(keycode, 0)
+
+
+@pytest.mark.parametrize("keycode,expected", [
+    (77, "Num_Lock"),
+    (66, "Caps_Lock"),
+    (78, "Scroll_Lock"),   # the one keysym_to_string mis-reports as '\x14'
+    (79, "Shift_Lock"),
+])
+def test_keysym_name_resolves_every_lock_key(keycode, expected):
+    from dials.grab import _keysym_name
+    assert _keysym_name(KeysymDisplay(REAL_KEYSYMS), keycode) == expected
+
+
+def test_a_real_mapped_scrolllock_is_tolerated_end_to_end():
+    """Drives the REAL _keysym_name, not a stub - this is what caught the bug."""
+    from dials.grab import _keysym_name
+    d = KeysymDisplay(REAL_KEYSYMS)
+    masks = tolerated_masks(mapping(mod3=(78,)), lambda kc: _keysym_name(d, kc))
+    assert sorted(masks) == sorted([0, X.LockMask, X.Mod3Mask,
+                                    X.LockMask | X.Mod3Mask])
+    for m in masks:
+        assert not m & X.Mod2Mask
+
+
+def test_keysym_name_degrades_on_an_unknown_keysym():
+    from dials.grab import _keysym_name
+    assert _keysym_name(KeysymDisplay({}), 999) == ""
