@@ -128,26 +128,38 @@ def test_operator_slots_survive_a_toml_round_trip(tmp_config_path, slot):
     assert reloaded.dial(slot).match_class == "someapp"
 
 
-def test_importing_the_daemon_does_not_pull_in_the_toml_writer():
-    """The daemon's budget forbids the TOML writer in its import graph.
+#: Modules the always-on daemon must never pull in. The <=16 MB budget depends
+#: on this graph staying clean, and every module the daemon imports is resident
+#: for the whole session. `tomli_w` and `dials.configwrite` are the TOML writer
+#: (the daemon imports it LAZILY inside the one function that persists a Dial);
+#: `curses`, `gi` and the two UI modules belong to the CLI/TUI/tray processes.
+FORBIDDEN_IN_DAEMON = ("tomli_w", "curses", "gi", "dials.tui", "dials.tray",
+                       "dials.configwrite")
 
-    Checked by importing in a SUBPROCESS: this suite imports tomli_w itself, so
-    an in-process sys.modules check would be polluted and pass vacuously. Checked
-    by import graph rather than by grepping daemon.py for "configwrite", because
-    the daemon legitimately imports it LAZILY inside the one function that
-    persists a Dial - a text search would fail on correct code.
+
+def test_importing_the_daemon_pulls_in_none_of_the_forbidden_modules():
+    """The daemon's budget forbids the TOML writer, curses, GTK and the UI.
+
+    Runs in a SUBPROCESS deliberately: this test suite imports several of these
+    modules itself, so an in-process sys.modules check would be polluted and
+    pass vacuously - and for three of the six it would pass while the daemon
+    imported them eagerly.
+
+    Checked by import graph rather than by grepping daemon.py, because the lazy
+    imports the daemon does make are correct and a text search would fail on
+    correct code.
     """
-    import importlib.util
+    import json
     import subprocess
     import sys
 
-    if importlib.util.find_spec("dials.daemon") is None:
-        pytest.skip("dials.daemon not implemented yet")
-
     result = subprocess.run(
         [sys.executable, "-c",
-         "import sys, dials.daemon; print('tomli_w' in sys.modules)"],
+         "import sys, json, dials.daemon; "
+         f"print(json.dumps([m for m in {list(FORBIDDEN_IN_DAEMON)!r} "
+         "if m in sys.modules]))"],
         capture_output=True, text=True,
     )
     assert result.returncode == 0, result.stderr
-    assert result.stdout.strip() == "False", "daemon imported the TOML writer"
+    leaked = json.loads(result.stdout.strip())
+    assert leaked == [], f"dials.daemon imported {leaked}"
