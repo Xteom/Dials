@@ -218,6 +218,64 @@ def test_a_transient_read_failure_does_not_reset_a_windows_appeared_time():
     assert o._first_seen[WID] == first, "appeared time was reset by a failed read"
 
 
+def test_wm_class_is_the_class_field_not_the_instance():
+    """WM_CLASS is (instance, class) and Dials matches on the CLASS field.
+
+    `firefox --class=Dial6` lands in the SECOND field, and on a real desktop
+    the two differ for nearly every app - so reading cls[0] would break all 15
+    Dials at once while every other test still passed.
+    """
+    WID = 0x500004
+    o, d = ops()
+
+    root_win = _FlakyWindow(o.root.id)
+    root_win.get_full_property = lambda atom, prop_type: _Prop([WID])
+    d.windows[o.root.id] = root_win
+    d.windows[WID] = _FlakyWindow(WID)      # get_wm_class -> ("instance", "cls")
+
+    listed = o.list_windows()
+    assert [w.wm_class for w in listed] == ["cls"]
+    assert listed[0].wm_class != "instance"
+
+
+def test_an_unreadable_client_list_is_not_reported_as_no_windows():
+    """`None` from the property read must not collapse into an empty list.
+
+    Two things break if it does: the pruning loop deletes EVERY _first_seen
+    entry (resetting every window's identity age, which choose(since=) relies
+    on), and handle_slot cannot tell "no windows" from "unknown" - so a Dial
+    for a RUNNING app decides to LAUNCH and a second instance appears.
+    _NET_CLIENT_LIST is genuinely unset for a moment across a
+    `gnome-shell --replace`, so this is not a hypothetical.
+    """
+    WID = 0x500005
+    o, d = ops()
+
+    root_win = _FlakyWindow(o.root.id)
+    root_win.get_full_property = lambda atom, prop_type: _Prop([WID])
+    d.windows[o.root.id] = root_win
+    d.windows[WID] = _FlakyWindow(WID)
+
+    o.list_windows()                        # scan 1: normal
+    first = o._first_seen[WID]
+
+    # scan 2: the ROOT window's read fails - the existing _FlakyWindow tests
+    # only ever fail the TARGET window, which is why 341 tests missed this.
+    def boom(atom, prop_type):
+        raise RuntimeError("x server hiccup")
+
+    root_win.get_full_property = boom
+    assert o.list_windows() == []
+    assert o._first_seen.get(WID) == first, \
+        "an unreadable client list wiped a live window's appeared time"
+
+    # scan 3: the read works again and the window is still the same window.
+    root_win.get_full_property = lambda atom, prop_type: _Prop([WID])
+    listed = o.list_windows()
+    assert [w.appeared for w in listed] == [first]
+    assert o._first_seen[WID] == first
+
+
 def test_list_windows_prunes_first_seen_for_windows_that_left_the_client_list():
     """The other half of the same invariant: _first_seen must not grow
     without bound in a long-running daemon, so a window that genuinely

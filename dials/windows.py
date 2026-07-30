@@ -162,7 +162,16 @@ class WindowOps:
 
     def list_windows(self) -> list["WindowInfo"]:
         """Every WM-managed window, with the fields the policy needs."""
-        ids = self._prop(self.root.id, "_NET_CLIENT_LIST") or []
+        raw = self._prop(self.root.id, "_NET_CLIENT_LIST")
+        if raw is None:
+            # Read failed, or the WM has not published the property yet (it is
+            # briefly unset across a `gnome-shell --replace`). "Unknown" must
+            # not be reported as "empty": pruning here would reset every
+            # window's appeared time, and an empty list makes every Dial look
+            # unlaunched, so a keypress would offer to launch a running app.
+            log.warning("could not read _NET_CLIENT_LIST; treating as unknown")
+            return []
+        ids = raw
         now = time.monotonic()
         out: list[WindowInfo] = []
         for wid in ids:
