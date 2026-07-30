@@ -1,0 +1,29 @@
+[project]
+name = "dials"
+version = "0.1.0"
+description = "Numpad-layer quake-style window panels for Pop!_OS (X11)"
+requires-python = ">=3.10"
+# NOTE: PyGObject is system-provided (python3-gi) and reached via the venv's
+# --system-site-packages. It is deliberately NOT listed here so uv/pip never
+# tries to build it from source. python-xlib is pure Python (no build).
+dependencies = [
+    "python-xlib>=0.29",
+    "tomli>=2.0; python_version < '3.11'",
+    "tomli-w>=1.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7"]
+
+[project.scripts]
+dialsd = "dials.daemon:main"
+dials = "dials.cli:main"
+dials-tray = "dials.tray:main"
+dials-confirm = "dials.confirm:main"
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["dials"]
