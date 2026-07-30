@@ -40,6 +40,21 @@ def test_a_mapped_scrolllock_grows_the_cross_product_to_four():
         assert not m & X.Mod2Mask
 
 
+def test_a_row_holding_numlock_and_a_tolerated_key_is_excluded_entirely():
+    """The one input where _FORBIDDEN_KEYSYMS is decisive.
+
+    A single modifier row can carry several keycodes. With Num_Lock AND a
+    tolerated lock key on the same row, the forbidden check must win: without
+    it the row is tolerated on the strength of Scroll_Lock, Mod2Mask enters the
+    cross product, and Dials would fire with NumLock ON - which also means the
+    numpad stops typing digits, the exact failure this module exists to prevent.
+    """
+    masks = tolerated_masks(mapping(mod2=(NUM_LOCK_KC, SCROLL_LOCK_KC)), keysyms)
+    assert sorted(masks) == [0, X.LockMask]
+    for m in masks:
+        assert not m & X.Mod2Mask
+
+
 def test_numlock_on_a_different_modifier_is_still_excluded():
     # Do not hardcode Mod2: find whichever modifier actually holds Num_Lock.
     masks = tolerated_masks(mapping(mod2=(), mod3=(NUM_LOCK_KC,)), keysyms)

@@ -278,7 +278,10 @@ def main(argv=None, deps: Deps | None = None, tui=None) -> int:
     sub.add_parser("reload", help="SIGHUP the daemon")
     sub.add_parser("status", help="daemon and config health")
     cfg = sub.add_parser("config", help="show or export config paths")
-    cfg.add_argument("export", nargs="?", default=None)
+    # choices, so `dials config bogus` is an error rather than being silently
+    # treated as a bare `dials config`. Absent stays valid: argparse only checks
+    # the default against choices when it is a string, and this one is None.
+    cfg.add_argument("export", nargs="?", default=None, choices=["export"])
 
     if not argv:
         if tui is None:

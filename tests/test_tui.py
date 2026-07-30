@@ -28,15 +28,25 @@ def keys_all():
     return list(keys.SLOT_KEYCODES)
 
 
+#: A Nerd Font glyph (nf-fa-spotify) - deliberately a character that cannot
+#: appear in the label "Spotify". Passing "S" made `"S" in text` satisfied by
+#: the label itself, so mutating the glyph out of cell_label survived.
+GLYPH = ""
+
+
 def test_cell_label_shows_the_glyph_and_a_truncated_label():
-    text = cell_label(dial(), "9", "S")
-    assert "9" in text and "S" in text
+    head, body = cell_label(dial(), "9", GLYPH).split("\n")
+    assert head == "9"
+    assert body.startswith(GLYPH), "the glyph must lead the label, not merely appear"
+    assert body == GLYPH + "Spotify"
 
 
 def test_cell_label_for_an_unbound_slot_shows_a_placeholder():
+    """Never assert on '-': the same shape has now been a vacuous test twice
+    in this branch, because a hyphen turns up in unrelated text for free."""
     text = cell_label(None, "5", "")
     assert "5" in text
-    assert "-" in text or "·" in text
+    assert "·" in text
 
 
 def test_cell_label_never_exceeds_the_cell_width():

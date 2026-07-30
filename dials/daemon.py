@@ -95,11 +95,12 @@ class Daemon:
         for tracker in self.trackers.values():
             tracker.forget()
         self.trackers.clear()
-        # Cancel first so a reload never leaves a stale capture armed, then
-        # rebuild: AssignMode snapshots `defaults` at construction, so keeping
-        # the old instance would bind post-reload Dials with the PRE-reload
-        # on_focus_loss / pin_geometry.
-        self.assign.cancel()
+        # Replacing the instance is what drops any armed capture - a fresh
+        # AssignMode is unarmed by construction, so an explicit cancel() here
+        # would be dead code. Rebuilding rather than reusing is required for a
+        # second reason: AssignMode snapshots `defaults` at construction, so
+        # keeping the old instance would bind post-reload Dials with the
+        # PRE-reload on_focus_loss / pin_geometry.
         self.assign = AssignMode(clock=self._clock, notifier=self._notify,
                                  defaults=config.defaults)
         self.launcher.cancel()

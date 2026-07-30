@@ -332,6 +332,26 @@ pin_geometry = true
     assert bound.pin_geometry is True
 
 
+def test_reload_cancels_a_pending_launch_so_the_return_grab_is_dropped():
+    """A leaked global `Return` grab takes Enter away from EVERY application.
+
+    main() holds the temporary Enter grabs for exactly as long as
+    grabs_needed() is True, so reload() dropping the pending launch is what
+    releases them. Removing launcher.cancel() from reload() survived the whole
+    suite before this test existed.
+    """
+    d = daemon(FakeOps(windows=[]))
+    d.handle_slot("9", timestamp=1)
+    assert d.launcher.grabs_needed(False) is True
+
+    d.reload(CONFIG)
+
+    assert d.launcher.pending is None
+    assert d.launcher.grabs_needed(False) is False, \
+        "the temporary global Return grab would be held forever"
+    assert d.select_timeout() is None
+
+
 def test_a_malformed_config_on_reload_keeps_the_last_good_one_and_notifies():
     """SIGHUP with a broken hand-edited config must not kill the daemon.
 

@@ -22,6 +22,9 @@ REFERENCE_HEADER = """\
 # REFERENCE COPY - NOT LIVE. Nothing reads this file.
 # The live config is ~/.config/dials/config.toml
 # Refresh this snapshot with:  dials config export
+# WARNING: that command REGENERATES this file from the live config and does not
+# preserve comments - the hand-written notes here are load-bearing, so restore
+# them with `git checkout config/config.reference.toml` if you overwrite them.
 """
 
 

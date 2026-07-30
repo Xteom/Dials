@@ -30,7 +30,12 @@ def notify(summary: str, body: str = "", timeout_ms: int = 2500,
         "[]", "{}", str(timeout_ms),
     ]
     try:
-        result = runner(cmd, capture_output=True, text=True, timeout=5)
+        # 1s, not 5s: this call is SYNCHRONOUS and the daemon is single
+        # threaded, so the whole event loop stalls here for a gdbus round trip -
+        # or for the full timeout if the notification daemon is wedged. During
+        # that window no Dial fires and no deadline expires, so the timeout is
+        # the worst-case freeze a cosmetic notification can impose.
+        result = runner(cmd, capture_output=True, text=True, timeout=1.0)
     except Exception:
         return False
     return getattr(result, "returncode", 1) == 0
