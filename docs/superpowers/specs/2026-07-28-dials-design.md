@@ -522,8 +522,7 @@ on_focus_loss = "hide"
 [dials."6"]
 label         = "Firefox panel"
 match_class   = "Dial6"
-# absolute --profile path, NOT -P dial6 -- see "The dial6 profile" below
-launch        = "firefox --profile /home/xteom/.mozilla/firefox/wcobxzqa.dial6 --class=Dial6 --no-remote --new-instance"
+launch        = "firefox -P dial6 --class=Dial6 --no-remote --new-instance"
 monitor       = "HDMI-0"
 rect          = [0.5, 0.0, 0.5, 1.0]
 on_focus_loss = "above"
@@ -609,36 +608,31 @@ Firefox profiles is too surprising for an installer.
 
 ### The dial6 profile
 
-The profile already exists at `~/.mozilla/firefox/wcobxzqa.dial6`, and Dial `6` uses it. Two things
-about its current state drive how it is referenced:
+The profile exists at `~/.mozilla/firefox/wcobxzqa.dial6` and is registered in `profiles.ini` as
+`[Profile2] Name=dial6`, so Dial `6` references it **by name**:
 
-- **It is not registered in `profiles.ini`.** That file lists only `default` and `default-release`;
-  there is no entry whose `Name=dial6`. So `firefox -P dial6` would *not* find it and would fall
-  through to the profile manager.
-- **It has never been launched.** The directory contains only `times.json` — no `prefs.js`, no
-  `compatibility.ini` — which is the state Firefox leaves right after creating a profile and before
-  first run.
+```
+firefox -P dial6 --class=Dial6 --no-remote --new-instance
+```
 
-The likely explanation is a well-known Firefox behavior: a running instance holds `profiles.ini` and
-rewrites it from its own in-memory copy, dropping entries added by a separate profile-manager
-invocation. Firefox was running while this was checked, which fits.
+Referencing by name rather than by `--profile <absolute path>` keeps the machine-specific directory
+hash and an absolute `$HOME` out of the config, and survives the profile directory being recreated.
 
-The design therefore references the profile by **absolute path** with `--profile`, not by name with
-`-P`:
+Worth recording, because it briefly looked like a defect and is a trap for anyone re-checking this:
+when first inspected, the profile directory held only `times.json` and there was **no** `dial6` entry
+in `profiles.ini` — which looks exactly like the known Firefox behavior where a running instance
+rewrites `profiles.ini` from memory and drops entries added elsewhere. That diagnosis was wrong. The
+profile simply had not been opened yet; Firefox writes the `profiles.ini` entry and populates the
+directory (`prefs.js`, `compatibility.ini`, `places.sqlite`) on **first launch**. After one launch
+both appeared. A freshly created, never-opened Firefox profile is invisible to `-P` — it is not
+broken, just not yet realised.
+
+If the entry ever does go missing, the fallback bypasses `profiles.ini` entirely and needs no repair
+to Firefox's own configuration:
 
 ```
 firefox --profile /home/xteom/.mozilla/firefox/wcobxzqa.dial6 --class=Dial6 --no-remote --new-instance
 ```
-
-This is the more robust option regardless of how the entry went missing: `--profile` bypasses
-`profiles.ini` completely, so the Dial cannot be broken by Firefox rewriting that file, by the
-profile manager, or by a name collision. It needs no edit to Firefox's own configuration, which also
-keeps this project's footprint smaller.
-
-If named profiles are preferred later, registering it is a four-line addition to `profiles.ini`
-(`[Profile2]`, `Name=dial6`, `IsRelative=1`, `Path=wcobxzqa.dial6`) made **while Firefox is not
-running**, after which `-P dial6` works. The absolute-path form keeps working either way, so nothing
-depends on doing it.
 
 `match_class` is `Dial6`, matching the profile name, so which Firefox window belongs to which Dial is
 obvious from either side. Because the class is what identifies the window, it must stay in sync with

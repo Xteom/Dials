@@ -39,10 +39,11 @@ label         = "Firefox (dial6)"
 # Must stay in sync with --class in `launch` below - the class is what identifies
 # the window. This is the one pairing not to break when editing this Dial.
 match_class   = "Dial6"
-# Absolute --profile path on purpose, NOT `-P dial6`: the dial6 profile is not
-# registered in profiles.ini, and --profile bypasses that file entirely so a
-# running Firefox rewriting it cannot break this Dial.
-launch        = "firefox --profile /home/xteom/.mozilla/firefox/wcobxzqa.dial6 --class=Dial6 --no-remote --new-instance"
+# The dial6 profile is registered in profiles.ini, so reference it by name - no
+# machine-specific path hash baked into config. If the entry ever goes missing,
+# the fallback that bypasses profiles.ini entirely is:
+#   firefox --profile ~/.mozilla/firefox/wcobxzqa.dial6 --class=Dial6 ...
+launch        = "firefox -P dial6 --class=Dial6 --no-remote --new-instance"
 icon          = ""
 monitor       = "HDMI-0"
 rect          = [0.5, 0.0, 0.5, 1.0]
