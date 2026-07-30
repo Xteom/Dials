@@ -4,6 +4,11 @@ import pytest
 
 from dials.cli import Deps, main
 from dials.config import Config, Defaults, Dial
+from dials.geometry import Monitor, Rect
+from dials.windows import WindowInfo
+
+DEFAULT_MONITOR = Monitor(name="HDMI-0", rect=Rect(0, 0, 1920, 1080),
+                          primary=True, crtc=1)
 
 
 def dial(slot="9", cls="spotify"):
@@ -12,12 +17,14 @@ def dial(slot="9", cls="spotify"):
                 on_focus_loss="hide", pin_geometry=False)
 
 
-def deps(dials=None, paused=False, windows=()):
+def deps(dials=None, paused=False, windows=(), active=None,
+         geometry=Rect(100, 100, 800, 600), monitor=DEFAULT_MONITOR):
     state = {
         "config": Config(defaults=Defaults(), dials=dials or {}),
         "paused": paused,
         "signals": [],
         "exports": 0,
+        "upserts": 0,
     }
     out = io.StringIO()
 
@@ -25,6 +32,7 @@ def deps(dials=None, paused=False, windows=()):
         return state["config"]
 
     def _upsert(path, d):
+        state["upserts"] += 1
         state["config"] = Config(state["config"].defaults,
                                  {**state["config"].dials, d.slot: d})
         return state["config"]
@@ -47,24 +55,31 @@ def deps(dials=None, paused=False, windows=()):
         pause_set=lambda v: state.__setitem__("paused", v),
         signal_daemon=lambda: state["signals"].append("HUP") or True,
         list_windows=lambda: list(windows),
+        active_window=lambda: active,
+        window_geometry=lambda wid: geometry,
+        monitor_for=lambda rect: monitor,
         out=out,
     )
     return d, state, out
 
 
-def test_list_shows_every_slot_including_empty_ones():
-    d, _, out = deps({"9": dial()})
-    assert main(["list"], deps=d) == 0
-    text = out.getvalue()
-    assert "Spotify" in text
-    assert "9" in text
-    assert text.count("\n") >= 15      # all 15 bindable slots listed
-
-
-def test_list_marks_unbound_slots():
+def test_list_renders_all_fifteen_bindable_slots():
+    from dials import keys
     d, _, out = deps({})
     main(["list"], deps=d)
-    assert "unbound" in out.getvalue().lower() or "-" in out.getvalue()
+    lines = [ln for ln in out.getvalue().splitlines() if ln.strip()]
+    assert len(lines) == 1 + len(keys.BINDABLE_SLOTS)      # header + one row per slot
+    for slot in keys.BINDABLE_SLOTS:
+        assert any(ln.split()[0] == slot for ln in lines[1:]), f"slot {slot} missing"
+
+
+def test_list_marks_every_unbound_slot():
+    """Header contains a hyphen, so never assert on '-' - it can never fail."""
+    d, _, out = deps({"9": dial()})
+    main(["list"], deps=d)
+    text = out.getvalue()
+    assert text.lower().count("(unbound)") == 14   # 15 bindable slots minus one bound
+    assert "Spotify" in text
 
 
 def test_unbind_removes_the_slot_and_signals_the_daemon():
@@ -83,6 +98,55 @@ def test_unbind_rejects_the_reserved_slot():
 def test_unbind_rejects_an_unknown_slot():
     d, _, _ = deps({})
     assert main(["unbind", "99"], deps=d) != 0
+
+
+def test_capture_updates_the_dial_from_the_matched_window():
+    win = WindowInfo(wid=42, wm_class="spotify",
+                     wtype="_NET_WM_WINDOW_TYPE_NORMAL",
+                     override_redirect=False, transient_for=None, appeared=0.0)
+    rect = Rect(960, 0, 960, 1080)
+    d, state, _ = deps({"9": dial()}, windows=(win,), active=42,
+                       geometry=rect, monitor=DEFAULT_MONITOR)
+    assert main(["capture", "9"], deps=d) == 0
+    from dials.assign import derive_rect
+    updated = state["config"].dials["9"]
+    assert updated.monitor == DEFAULT_MONITOR.name
+    assert updated.rect == derive_rect(rect, DEFAULT_MONITOR)
+    assert state["signals"] == ["HUP"]
+    assert state["upserts"] == 1
+
+
+def test_capture_reports_no_matching_window():
+    d, state, out = deps({"9": dial()}, windows=(), active=None)
+    assert main(["capture", "9"], deps=d) == 1
+    assert state["upserts"] == 0
+    assert "no window" in out.getvalue().lower()
+
+
+def test_capture_rejects_an_unbound_slot():
+    d, state, _ = deps({})
+    assert main(["capture", "9"], deps=d) == 2
+    assert state["upserts"] == 0
+
+
+def test_capture_rejects_the_reserved_slot():
+    d, state, out = deps({})
+    assert main(["capture", "."], deps=d) == 2
+    assert "reserved" in out.getvalue().lower()
+    assert state["upserts"] == 0
+
+
+def test_capture_falls_back_to_a_default_rect_when_geometry_is_unavailable():
+    win = WindowInfo(wid=42, wm_class="spotify",
+                     wtype="_NET_WM_WINDOW_TYPE_NORMAL",
+                     override_redirect=False, transient_for=None, appeared=0.0)
+    d, state, _ = deps({"9": dial()}, windows=(win,), active=42,
+                       geometry=None, monitor=DEFAULT_MONITOR)
+    assert main(["capture", "9"], deps=d) == 0
+    from dials.assign import derive_rect
+    updated = state["config"].dials["9"]
+    assert updated.rect == derive_rect(Rect(0, 0, 800, 600), DEFAULT_MONITOR)
+    assert state["upserts"] == 1
 
 
 def test_pause_sets_the_flag_and_signals():

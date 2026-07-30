@@ -10,7 +10,6 @@ import os
 import signal
 import sys
 from dataclasses import dataclass, field
-from pathlib import Path
 
 from dials import icons, keys
 from dials.config import (
@@ -59,6 +58,35 @@ def _list_windows():
     return WindowOps(d, d.screen().root).list_windows()
 
 
+def _active_window():
+    from Xlib import display
+    from dials.windows import WindowOps
+    d = display.Display()
+    return WindowOps(d, d.screen().root).active_window()
+
+
+def _window_geometry(wid):
+    from Xlib import display
+    from dials.windows import WindowOps
+    d = display.Display()
+    return WindowOps(d, d.screen().root).geometry(wid)
+
+
+def _monitor_for(rect):
+    """Resolve which monitor a pixel rect sits on.
+
+    Keeping the whole resolution behind this seam means cli.py does not import
+    daemon's private _monitor_containing, and capture becomes testable with a
+    plain fake.
+    """
+    from Xlib import display
+    from dials.daemon import _monitor_containing
+    from dials.monitors import MonitorSource
+    d = display.Display()
+    src = MonitorSource(d, d.screen().root)
+    return _monitor_containing(rect, src.monitors(), src.root_rect())
+
+
 def _upsert(path, dial):
     from dials.configwrite import upsert_dial
     return upsert_dial(path, dial)
@@ -90,6 +118,9 @@ class Deps:
     pause_set: callable = _pause_set
     signal_daemon: callable = _signal_daemon
     list_windows: callable = _list_windows
+    active_window: callable = _active_window
+    window_geometry: callable = _window_geometry
+    monitor_for: callable = _monitor_for
     out: object = field(default_factory=lambda: sys.stdout)
 
 
@@ -141,24 +172,18 @@ def _cmd_capture(args, d: Deps) -> int:
     if dial is None:
         print(f"slot {args.slot} is unbound", file=d.out)
         return 2
+    from dataclasses import replace
     from dials.assign import derive_rect
-    from dials.daemon import _monitor_containing
     from dials.geometry import Rect
-    from Xlib import display
-    from dials.monitors import MonitorSource
-    from dials.windows import WindowOps, choose
+    from dials.windows import choose
 
-    dsp = display.Display()
-    ops = WindowOps(dsp, dsp.screen().root)
-    mons = MonitorSource(dsp, dsp.screen().root)
-    chosen = choose(ops.list_windows(), dial.match_class,
-                    active_id=ops.active_window())
+    chosen = choose(d.list_windows(), dial.match_class,
+                    active_id=d.active_window())
     if chosen is None:
         print(f"no window matching class {dial.match_class!r}", file=d.out)
         return 1
-    rect = ops.geometry(chosen.wid) or Rect(0, 0, 800, 600)
-    monitor = _monitor_containing(rect, mons.monitors(), mons.root_rect())
-    from dataclasses import replace
+    rect = d.window_geometry(chosen.wid) or Rect(0, 0, 800, 600)
+    monitor = d.monitor_for(rect)
     updated = replace(dial, monitor=monitor.name,
                       rect=derive_rect(rect, monitor))
     d.upsert(config_path(), updated)
@@ -254,3 +279,7 @@ def main(argv=None, deps: Deps | None = None, tui=None) -> int:
         "status": _cmd_status, "config": _cmd_config,
     }
     return handlers[args.command](args, d)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
