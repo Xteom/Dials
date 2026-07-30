@@ -185,7 +185,11 @@ class Daemon:
             return action
         except Exception:
             # Degrade never crash: a dead window or an X hiccup must not take
-            # the daemon down mid-keypress.
+            # the daemon down mid-keypress. This is the most-executed swallow in
+            # the project, so it logs: the spec's rule is "logged and
+            # swallowed", and a Dial that silently does nothing on every press
+            # is otherwise undiagnosable.
+            log.exception("handle_slot failed for slot %r", slot)
             return None
 
     def dispatch_key(self, keycode: int, timestamp: int) -> str | None:
@@ -451,11 +455,59 @@ def _report_grab_failures(failures: dict[int, list[int]]) -> None:
               f"{[hex(m) for m in masks]}", file=sys.stderr)
 
 
+def _install_confirm_grabs(launcher, factory, notifier=None):
+    """Grab the Enter keys while a launch confirmation is pending.
+
+    Extracted from `main()` so the ABANDON decision is testable without an X
+    server: this branch decides whether a temporary GLOBAL `Return` grab is held
+    or given up, which is the most intrusive thing in the whole design.
+
+    Returns the GrabManager to hold, or None when nothing could be grabbed - in
+    which case the pending launch is cancelled and the user told, because a
+    confirmation nobody can reach is worse than no confirmation at all.
+    """
+    if notifier is None:
+        from dials.notify import notify as notifier
+    extra = factory()
+    failures = extra.install(launcher.confirm_keycodes())
+    if failures:
+        # Keycode 104 (KP_Enter) is EXPECTED to fail on every mask: it is
+        # already grabbed permanently as Dial slot "enter", and X returns
+        # BadAccess for a duplicate grab. Only `Return` (36) can newly succeed.
+        # Reported rather than discarded because the spec requires "keep the
+        # successful grab, report the other" - without this an operator cannot
+        # tell why Enter did not work.
+        log.warning(
+            "confirm-grab failures (keycode %d = KP_Enter is expected here, it "
+            "is already grabbed as Dial 'enter'): %s",
+            keys.KP_ENTER_KEYCODE,
+            {kc: [hex(m) for m in masks] for kc, masks in failures.items()},
+        )
+    if not extra.active:
+        # The guard asks "did anything at all get grabbed", never "how many
+        # keycodes succeeded": counting keycodes would degenerate into "cancel
+        # iff Return failed on any single mask" and would spuriously abandon a
+        # launch that Return could still confirm.
+        extra.remove_all()
+        launcher.cancel()
+        notifier("Cannot confirm launch",
+                 "Return/Enter key unavailable (grabbed by another app); "
+                 "launch cancelled")
+        return None
+    return extra
+
+
 def main() -> int:
     import socket
 
     from Xlib import X, display
     from Xlib.error import ConnectionClosedError
+
+    # Without this only logging.lastResort carries records, so every daemon
+    # diagnostic reached journald with no level and no logger name. journald
+    # supplies its own timestamp, so the format deliberately does not.
+    logging.basicConfig(level=logging.INFO,
+                       format="%(levelname)s %(name)s: %(message)s")
 
     d = display.Display()
     root = d.screen().root
@@ -566,22 +618,11 @@ def main() -> int:
             # Hold the temporary Enter grabs only while a confirmation is pending.
             need = daemon.launcher.grabs_needed(confirm_grabs_held)
             if need and not confirm_grabs_held and not daemon.paused:
-                extra = GrabManager(d, root, masks=grabs.masks)
-                # Keycode 104 (KP_Enter) is EXPECTED to fail every mask here: it
-                # is already grabbed permanently as Dial slot "enter", and X
-                # returns BadAccess for a duplicate grab. Only `Return` (36) can
-                # newly succeed, so the guard must ask "did anything at all get
-                # grabbed" rather than count keycodes - counting would degenerate
-                # into "cancel iff Return failed on any single mask" and would
-                # spuriously abandon a launch that Return could still confirm.
-                extra.install(daemon.launcher.confirm_keycodes())
-                if not extra.active:
-                    extra.remove_all()
-                    daemon.launcher.cancel()
-                    from dials.notify import notify
-                    notify("Cannot confirm launch",
-                           "Enter could not be grabbed; launch cancelled")
-                else:
+                extra = _install_confirm_grabs(
+                    daemon.launcher,
+                    lambda: GrabManager(d, root, masks=grabs.masks),
+                )
+                if extra is not None:
                     confirm_grabs = extra
                     confirm_grabs_held = True
             elif confirm_grabs_held and not need:

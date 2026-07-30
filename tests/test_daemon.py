@@ -643,6 +643,98 @@ def test_a_pre_existing_window_is_not_mistaken_for_the_launched_one():
     assert d.launcher.pending is not None              # still waiting
 
 
+# ---- the temporary Enter grabs ------------------------------------------
+
+class FakeGrabs:
+    """Stands in for GrabManager. `fail` lists keycodes whose grabs all fail."""
+
+    def __init__(self, fail=(), masks=(0, 2)):
+        self.fail = set(fail)
+        self.masks = list(masks)
+        self.installed: list[tuple[int, int]] = []
+        self.removed = 0
+
+    def install(self, keycodes):
+        failures: dict[int, list[int]] = {}
+        for kc in keycodes:
+            for mask in self.masks:
+                if kc in self.fail:
+                    failures.setdefault(kc, []).append(mask)
+                else:
+                    self.installed.append((kc, mask))
+        return failures
+
+    @property
+    def active(self):
+        return bool(self.installed)
+
+    def remove_all(self):
+        self.removed += 1
+        self.installed.clear()
+
+
+def test_a_failed_return_grab_cancels_the_launch_and_notifies():
+    """Both Enter keys ungrabbable: never leave a confirmation nobody can reach.
+
+    This branch decides whether a temporary GLOBAL `Return` grab is abandoned
+    or held, which is the most intrusive thing in the design - and it was
+    untested.
+    """
+    from dials.daemon import _install_confirm_grabs
+
+    notes = Notes()
+    d = daemon(FakeOps(windows=[]))
+    d.handle_slot("9", timestamp=1)
+    assert d.launcher.pending is not None
+
+    grabs = FakeGrabs(fail=(keys.RETURN_KEYCODE, keys.KP_ENTER_KEYCODE))
+    held = _install_confirm_grabs(d.launcher, lambda: grabs, notifier=notes)
+
+    assert held is None, "nothing was grabbed, so nothing may be held"
+    assert grabs.removed == 1
+    assert d.launcher.pending is None, "the launch must be cancelled"
+    assert notes.mentions("return/enter")
+    assert notes.mentions("cancelled")
+
+
+def test_a_failed_kp_enter_grab_still_keeps_the_launch_and_reports_it(caplog):
+    """KP_Enter ALWAYS fails: it is already grabbed as Dial slot "enter".
+
+    So the guard must ask "did anything at all get grabbed" rather than count
+    keycodes, or every single confirmation would be spuriously abandoned. The
+    failure is still reported, since otherwise an operator cannot tell why
+    Enter did not work.
+    """
+    from dials.daemon import _install_confirm_grabs
+
+    notes = Notes()
+    d = daemon(FakeOps(windows=[]))
+    d.handle_slot("9", timestamp=1)
+
+    grabs = FakeGrabs(fail=(keys.KP_ENTER_KEYCODE,))
+    with caplog.at_level("WARNING"):
+        held = _install_confirm_grabs(d.launcher, lambda: grabs, notifier=notes)
+
+    assert held is grabs
+    assert d.launcher.pending is not None, "Return could still confirm this"
+    assert notes == [], "nothing to tell the user: Return was grabbed"
+    assert any(str(keys.KP_ENTER_KEYCODE) in r.getMessage()
+               for r in caplog.records), "the failure was not reported"
+
+
+def test_handle_slot_logs_when_it_swallows(caplog):
+    """The most-executed swallow in the project; the spec says "logged"."""
+    ops = FakeOps(windows=[win(5)])
+
+    def boom():
+        raise RuntimeError("x server hiccup")
+
+    ops.list_windows = boom
+    with caplog.at_level("ERROR"):
+        assert daemon(ops).handle_slot("9", timestamp=1) is None
+    assert any("handle_slot failed" in r.getMessage() for r in caplog.records)
+
+
 # ---- tick ---------------------------------------------------------------
 
 def test_tick_expires_an_armed_confirmation():
