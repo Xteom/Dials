@@ -782,17 +782,22 @@ can be revisited after living with it.
 
 ```
 dials list                 # table of all 15 slots, bound or not
-dials bind <slot>          # bind interactively (opens the window picker)
 dials unbind <slot>
 dials capture <slot>       # save the matched window's current geometry into its Dial
 dials reload               # SIGHUP the daemon
 dials pause                # release all grabs; numpad behaves stock in both NumLock states
 dials resume               # re-install grabs
-dials status               # daemon state, grab conflicts, monitor fallbacks, geometry mismatches
+dials status               # paused or active, how many Dials are bound, config health
 dials config               # print the live path and the reference path; flag if the snapshot differs
 dials config export        # overwrite the repo reference copy from the live config
 dials                      # no args -> curses TUI
 ```
+
+Interactive binding is the **TUI's `b` key** (window picker), plus assign mode's `.` hotkey — there is
+no `dials bind <slot>` subcommand, and an earlier draft of this block wrongly listed one.
+`dials status` reports only what a short-lived CLI process can see for itself; the grab-conflict,
+monitor-fallback and geometry-mismatch reporting promised elsewhere in this document is **not built**
+— see *Deferred*.
 
 `pause` exists because these grabs are global: if a game or a remote-desktop session needs the raw
 numpad keys, there has to be a way to stand down without stopping the service. It is a flag file in
@@ -970,6 +975,19 @@ directory.
 
 ## Deferred
 
+- **Runtime diagnostics in `dials status`** — grab conflicts, monitor fallbacks and geometry
+  mismatches. This document promises them in four places (*Resolution fallback chain*,
+  *Geometry limits*, the *Confirmation edge cases* table, and the *Error handling* table) and the
+  shipped `dials status` reports none of them. It reports what one short-lived process can see for
+  itself: paused/active, how many Dials are bound, and whether the config parses. Everything else
+  lives in the **daemon's** memory, and `status` is a separate process with no channel to it, so this
+  is a missing feature rather than a missing print statement: it needs a daemon→CLI channel — a JSON
+  state file written to `state_dir()` on each event, or D-Bus. What exists instead, per diagnostic:
+  grab failures are printed to stderr at startup and on resume, so `journalctl --user -u dialsd` has
+  them; a monitor fallback raises a desktop notification once per Dial (and `monitors.pick` already
+  returns the reason string this feature would consume); **geometry mismatch is not detected at all**
+  — nothing reads the granted geometry back, so the "log the discrepancy once" line in
+  *Geometry limits* is unimplemented too.
 - **Crosshair click-to-pick** binding (`xdotool selectwindow`) — the assign-mode hotkey and the TUI
   window picker cover the need; this is a small addition if it turns out to be wanted.
 - **Real bitmap app icons** in the TUI via the Kitty graphics protocol.

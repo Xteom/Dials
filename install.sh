@@ -75,7 +75,7 @@ Dials installed.
   NumLock ON  -> the numpad types digits, exactly as before
 
   dials list     show every slot
-  dials status   health, grab conflicts, monitor fallbacks
+  dials status   paused or active, how many Dials are bound, config health
   dials pause    stand down (for a game or remote desktop)
 
   '.' arms assign mode: focus a window, press '.', then press a numpad key.

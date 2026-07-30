@@ -44,7 +44,7 @@ never lost behind a double-press.
 
 ```sh
 dials list          # every slot
-dials status        # grab conflicts, monitor fallbacks, config health
+dials status        # paused or active, how many Dials are bound, config health
 dials capture 9     # save a window's current position into its Dial
 dials pause         # stand down for a game or remote desktop
 dials              # curses numpad grid
