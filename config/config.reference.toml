@@ -1,0 +1,50 @@
+# REFERENCE COPY - NOT LIVE. Nothing reads this file.
+# The live config is ~/.config/dials/config.toml
+# Refresh this snapshot with:  dials config export
+#
+# A Dial is one numpad key holding one window. Dials fire only while NumLock is
+# OFF; with NumLock ON the keypad types digits exactly as normal.
+#
+# Slots: 0-9 / * - + enter        ('.' is reserved for assign mode)
+
+[defaults]
+# Falls back to primary if this output is absent. Never store absolute pixels -
+# the layout on this machine has changed mid-session before.
+monitor       = "HDMI-0"
+# x, y, w, h as fractions of the monitor rect
+rect          = [0.0, 0.0, 0.5, 1.0]
+# normal = can be buried | above = never buried | hide = hides on focus loss
+on_focus_loss = "hide"
+# Re-apply geometry on every raise, not just on show. Off so hand-nudging a
+# window is not undone on the next keypress; use `dials capture <slot>` instead.
+pin_geometry  = false
+
+
+# Left half of the ultrawide.
+[dials."9"]
+label         = "Spotify"
+match_class   = "spotify"
+# The scale flag must stay: it is the min-width workaround from the sibling
+# spotify_width project. Without it Spotify refuses to go narrow.
+launch        = "/snap/bin/spotify --force-device-scale-factor=0.7"
+icon          = ""
+monitor       = "HDMI-0"
+rect          = [0.0, 0.0, 0.5, 1.0]
+on_focus_loss = "hide"
+
+
+# Right half of the ultrawide, so it can sit beside Spotify without overlapping.
+[dials."6"]
+label         = "Firefox (dial6)"
+# Must stay in sync with --class in `launch` below - the class is what identifies
+# the window. This is the one pairing not to break when editing this Dial.
+match_class   = "Dial6"
+# Absolute --profile path on purpose, NOT `-P dial6`: the dial6 profile is not
+# registered in profiles.ini, and --profile bypasses that file entirely so a
+# running Firefox rewriting it cannot break this Dial.
+launch        = "firefox --profile /home/xteom/.mozilla/firefox/wcobxzqa.dial6 --class=Dial6 --no-remote --new-instance"
+icon          = ""
+monitor       = "HDMI-0"
+rect          = [0.5, 0.0, 0.5, 1.0]
+# Stays up when focus moves elsewhere, and is never buried.
+on_focus_loss = "above"

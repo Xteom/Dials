@@ -467,33 +467,38 @@ values inherit from `[defaults]`.
 
 ### Config location
 
-The canonical file lives **in this repository**, at `config/config.toml`, and
-`~/.config/dials/config.toml` is a **symlink** to it:
+There are **two copies, and only one of them is live**:
 
+| Path | Role |
+| --- | --- |
+| `~/.config/dials/config.toml` | **The live config.** The only file the daemon, CLI and TUI ever read or write |
+| `dials/config/config.reference.toml` | **Reference copy in the repo.** Read by nothing. Exists so the configuration is visible in the workspace to future agents |
+
+No symlink. An earlier draft symlinked the XDG path into the repo; that is dropped because it made
+the running system depend on the project folder's location, which meant a dangling-link failure
+mode, a `--relink` repair command, and a health check in `dials status` — three pieces of machinery
+existing only to support the link. Two plain files need none of it.
+
+The reference copy carries a header making its status unambiguous, so nobody edits it expecting an
+effect:
+
+```toml
+# REFERENCE COPY - NOT LIVE. Nothing reads this file.
+# The live config is ~/.config/dials/config.toml
+# Refresh this snapshot with:  dials config export
 ```
-~/.config/dials/config.toml -> ~/Documents/personal/pc_tweaks/dials/config/config.toml
-```
 
-The real file is kept in the repo rather than in `~/.config` so that the live configuration sits in
-the workspace where it is version-controlled, diffable, and visible to future agents working on this
-project. The symlink direction matters: a symlink committed *into* the repo pointing out to `$HOME`
-would be an absolute path that breaks on any other machine and reads as a dangling link in
-`git status`. Pointing inward keeps the repo self-contained.
+`dials config export` overwrites the reference copy from the live one. It is manual on purpose:
+automatically mirroring every write would mean the daemon touching the repo, and a stale snapshot is
+a much smaller problem than a background process making git commits' worth of noise. `dials config`
+prints both paths and says whether the snapshot currently differs from the live file.
 
-Consequences, all intentional:
-
-- The daemon and CLI open the XDG path as normal and never need to know about the symlink.
-- Editing either path edits the same file.
-- Config changes made through the TUI show up as ordinary git diffs in this project, so Dial changes
-  get committed alongside code.
-- The config contains no secrets — app class names, launch commands, monitor names and fractions —
-  so it is safe to commit. It is deliberately **not** in `.gitignore`.
-- If the project folder is moved or deleted the symlink dangles. `dials status` reports this, and
-  `install.sh --relink` repairs it after a move.
+The config contains no secrets — app class names, launch commands, monitor names, fractions — so the
+reference copy is safe to commit, and is deliberately not in `.gitignore`.
 
 Runtime state — the pause flag and the tray PID file — stays in `~/.local/state/dials/` and is
-**not** moved into the repo: it is machine state, not configuration. The last-good config is held in
-memory by the running daemon and never written to disk.
+**not** mirrored into the repo: it is machine state, not configuration. The last-good config is held
+in memory by the running daemon and never written to disk.
 
 ### Schema
 
@@ -516,8 +521,9 @@ on_focus_loss = "hide"
 
 [dials."6"]
 label         = "Firefox panel"
-match_class   = "FFPanel"
-launch        = "firefox -P panel --class=FFPanel --no-remote --new-instance"
+match_class   = "Dial6"
+# absolute --profile path, NOT -P dial6 -- see "The dial6 profile" below
+launch        = "firefox --profile /home/xteom/.mozilla/firefox/wcobxzqa.dial6 --class=Dial6 --no-remote --new-instance"
 monitor       = "HDMI-0"
 rect          = [0.5, 0.0, 0.5, 1.0]
 on_focus_loss = "above"
@@ -589,8 +595,8 @@ Firefox needs more care, because Firefox refuses to run two instances against on
 "panel" Firefox window cannot simply be a second window of the normal browser. Options weighed:
 
 - **Chosen — dedicated panel profile with a custom class.**
-  `firefox -P panel --class=FFPanel --no-remote --new-instance`. Probe `02` confirms `--class` works
-  on Firefox 152, giving `WM_CLASS = "firefox", "FFPanel"` — unambiguous, stable across reboots,
+  Probe `02` confirms `--class` works
+  on Firefox 152, giving `WM_CLASS = "firefox", "<name>"` — unambiguous, stable across reboots,
   never confused with normal browsing. **Accepted cost (confirmed by the user):** separate cookies,
   history and extensions, plus a second Firefox process.
 - Rejected — matching a normal-profile window by title. Firefox window titles track the active tab,
@@ -598,8 +604,48 @@ Firefox needs more care, because Firefox refuses to run two instances against on
 - Rejected — binding a hand-picked X window id. Not stable across reboots; the binding dies with the
   window.
 
-The panel profile is created once, by hand, and documented in the README. `install.sh` does not
-create it — silently creating Firefox profiles is too surprising for an installer.
+The panel profile is created once, by hand. `install.sh` does not create it — silently creating
+Firefox profiles is too surprising for an installer.
+
+### The dial6 profile
+
+The profile already exists at `~/.mozilla/firefox/wcobxzqa.dial6`, and Dial `6` uses it. Two things
+about its current state drive how it is referenced:
+
+- **It is not registered in `profiles.ini`.** That file lists only `default` and `default-release`;
+  there is no entry whose `Name=dial6`. So `firefox -P dial6` would *not* find it and would fall
+  through to the profile manager.
+- **It has never been launched.** The directory contains only `times.json` — no `prefs.js`, no
+  `compatibility.ini` — which is the state Firefox leaves right after creating a profile and before
+  first run.
+
+The likely explanation is a well-known Firefox behavior: a running instance holds `profiles.ini` and
+rewrites it from its own in-memory copy, dropping entries added by a separate profile-manager
+invocation. Firefox was running while this was checked, which fits.
+
+The design therefore references the profile by **absolute path** with `--profile`, not by name with
+`-P`:
+
+```
+firefox --profile /home/xteom/.mozilla/firefox/wcobxzqa.dial6 --class=Dial6 --no-remote --new-instance
+```
+
+This is the more robust option regardless of how the entry went missing: `--profile` bypasses
+`profiles.ini` completely, so the Dial cannot be broken by Firefox rewriting that file, by the
+profile manager, or by a name collision. It needs no edit to Firefox's own configuration, which also
+keeps this project's footprint smaller.
+
+If named profiles are preferred later, registering it is a four-line addition to `profiles.ini`
+(`[Profile2]`, `Name=dial6`, `IsRelative=1`, `Path=wcobxzqa.dial6`) made **while Firefox is not
+running**, after which `-P dial6` works. The absolute-path form keeps working either way, so nothing
+depends on doing it.
+
+`match_class` is `Dial6`, matching the profile name, so which Firefox window belongs to which Dial is
+obvious from either side. Because the class is what identifies the window, it must stay in sync with
+`--class` in the launch line; that pairing is the one thing not to break when editing this Dial.
+
+First launch will be a bare profile — no extensions, no logins, default settings. That is the
+intended isolation, not a fault.
 
 ## Assign mode
 
@@ -734,8 +780,9 @@ dials capture <slot>       # save the matched window's current geometry into its
 dials reload               # SIGHUP the daemon
 dials pause                # release all grabs; numpad behaves stock in both NumLock states
 dials resume               # re-install grabs
-dials status               # daemon state, grab conflicts, monitor fallbacks, config link health
-dials config               # print both the XDG path and the repo path it resolves to
+dials status               # daemon state, grab conflicts, monitor fallbacks, geometry mismatches
+dials config               # print the live path and the reference path; flag if the snapshot differs
+dials config export        # overwrite the repo reference copy from the live config
 dials                      # no args -> curses TUI
 ```
 
@@ -786,6 +833,57 @@ cosmetic indicator.
 The **daemon never polls anything** — this timer lives only in `dials-tray`, which is opt-in. That
 keeps the always-on process purely event-driven per the AGENTS.md daemon rules.
 
+## Resource budget
+
+Lightweight is a hard requirement, not an aspiration, so it gets stated as numbers the build must hit
+and design rules that produce them. The reference point is the sibling `clip` daemon: same stack
+(python-xlib on Python 3.10, event-driven, no GTK), measured at ~14 MB idle.
+
+| Process | Idle CPU | Idle RSS | Wakeups at idle |
+| --- | --- | --- | --- |
+| `dialsd` (always on) | **0.0 %** | **≤ 16 MB** | **0 / s** |
+| `dials-tray` (opt-in) | ≤ 0.01 % | ≤ 45 MB (GTK) | 1 / s |
+| `dials`, `dials-confirm` | transient — contribute nothing at idle | | |
+
+### How the daemon reaches zero
+
+- **Block, never poll.** The daemon owns one X connection and blocks in `select()` on its file
+  descriptor. With no keys pressed and no focus changes, the process is not scheduled at all — which
+  is what makes 0.0 % CPU and 0 wakeups/s achievable rather than merely small.
+- **No periodic timer exists.** The three timeouts in the design — assign mode 5 s, launch
+  confirmation 5 s, wait-for-window 10 s — are expressed as the `select()` timeout, and that timeout
+  is `None` (infinite) whenever nothing is armed. Timers exist only while a Dial is mid-interaction,
+  never in the steady state. This is the specific reason the 10 s launch waiter must not be a
+  `sleep()` loop.
+- **No caches to keep warm.** Window lookups are done on demand; probe `06` measured an X round trip
+  at ~28 µs, so caching window state would trade real complexity and staleness bugs for microseconds.
+  The only cache is the monitor list, and it is invalidated by RandR events rather than refreshed on a
+  schedule.
+- **Lazy, minimal imports.** The daemon must never import `curses`, `gi`/GTK, the TOML *writer*, or
+  the TUI modules. Config reading uses `tomllib` (`tomli` on 3.10); writing lives only in the CLI
+  path. Import graph is part of the budget: every module the daemon pulls in is resident for the
+  session.
+- **No subprocesses at idle.** `gdbus` is spawned only to show a notification and exits immediately.
+  Nothing is kept alive to listen.
+- **systemd limits as a backstop**, per the AGENTS.md daemon rules: `MemoryMax=64M`, `CPUQuota=5%`,
+  `Nice=5`. These are guard rails against a regression, not the plan — a daemon that needs them has
+  already broken the budget.
+
+### What lightweight cost us
+
+Two features were dropped or kept opt-in on these grounds, and it is worth recording that the
+trade was made deliberately:
+
+- **The config symlink and its machinery** (dangling-link handling, `--relink`, a health check in
+  `status`) — removed entirely in favour of two plain files.
+- **The tray is opt-in and measured separately.** A GTK status icon costs more than the daemon it
+  reports on, which is exactly why it is a second process behind an `install.sh --tray` flag rather
+  than folded in. Running without it costs nothing; `dials status` gives the same information from the
+  CLI.
+
+Verification is not optional: the numbers above get measured with the daemon idle for several minutes
+and written into the README, and a build that misses them is not finished.
+
 ## Error handling
 
 Follows `clip`'s degrade-never-crash rule — nothing in a keypress path may kill the daemon.
@@ -797,7 +895,7 @@ Follows `clip`'s degrade-never-crash rule — nothing in a keypress path may kil
 | RandR query raises | keep previous monitor cache; if none, root bounding box |
 | Zero usable monitors | root bounding box |
 | Config fails to parse | keep last-good config in memory, notify once |
-| Config symlink dangles (project moved) | treat as no config, run with `[defaults]` only, notify once, flag in `status` |
+| Live config missing entirely | run with `[defaults]` only, notify once, flag in `status` |
 | `launch` command fails | notify, give up |
 | Window never appears within 10 s | notify, give up |
 | `gdbus` notification fails | silent |
@@ -844,21 +942,20 @@ Same split `clip` documents.
    the constraint is inherited from `clip`'s environment gotcha and kept for consistency. Use
    `uv pip`, never `uv run`/`uv sync`.
 3. `uv pip install -e .`
-4. Seed `config/config.toml` in the repo if absent, then symlink `~/.config/dials/config.toml` to it.
-   If a **real file** already exists at the XDG path, move it into the repo as the seed and replace
-   it with the symlink; never clobber an existing config silently. `--relink` repairs the symlink
-   after the project folder moves.
+4. Write `~/.config/dials/config.toml` from the reference copy **only if it does not already exist**;
+   never overwrite a live config.
 5. Install and enable `dialsd.service`; with `--tray`, also `dials-tray.service`.
-6. Measure idle CPU and RSS and record them in the README, per the AGENTS.md daemon rules.
+6. Measure idle CPU, RSS and wakeups against the budget below and record them in the README, per the
+   AGENTS.md daemon rules.
 
-`uninstall.sh` stops and disables both units, removes the venv, and removes the `~/.config/dials/`
-symlink. It leaves `config/config.toml` in the repo untouched — that is version-controlled project
-content, not installed state.
+`uninstall.sh` stops and disables both units and removes the venv. It leaves both
+`~/.config/dials/config.toml` and the repo's reference copy alone — one is the user's live
+configuration, the other is version-controlled project content; neither is installer-owned state.
 
 **Revert plan.** Nothing outside the project is modified except: two `systemd --user` units in
-`~/.config/systemd/user/`, a venv at `~/.local/share/dials/`, a symlink at
+`~/.config/systemd/user/`, a venv at `~/.local/share/dials/`, a config file at
 `~/.config/dials/config.toml`, and state under `~/.local/state/dials/`. No dconf keys, no system
-packages, no changes to the X keymap. Stopping `dialsd` releases every key grab immediately and
+packages, no changes to the X keymap, and no changes to Firefox's `profiles.ini`. Stopping `dialsd` releases every key grab immediately and
 restores stock numpad behavior with NumLock off; nothing persists past process exit. The optional
 Firefox panel profile, if created, is removed with `firefox -P` or by deleting its profile
 directory.
