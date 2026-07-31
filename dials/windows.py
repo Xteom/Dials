@@ -102,6 +102,7 @@ PANEL_HINTS = (
     "_NET_WM_STATE_SKIP_PAGER",
 )
 
+_STATE_REMOVE = 0
 _STATE_ADD = 1
 _SOURCE_PAGER = 2
 
@@ -314,14 +315,26 @@ class WindowOps:
         )
 
     def apply_hints(self, wid: int, above: bool) -> None:
-        hints = list(PANEL_HINTS)
-        if above:
-            hints.append("_NET_WM_STATE_ABOVE")
-        for name in hints:
+        """Make `wid` behave as a panel, and set or clear its always-on-top state.
+
+        ABOVE is explicitly REMOVED when `above` is false, rather than merely not
+        added. _NET_WM_STATE messages are add/remove, not a full assignment, so
+        an add-only version could never undo itself: changing a Dial from
+        on_focus_loss="above" to "normal" left the window permanently on top
+        until the app was restarted, and the config quietly disagreed with the
+        screen. The other three hints are unconditional, so they never need the
+        remove branch.
+        """
+        for name in PANEL_HINTS:
             self._client_message(
                 wid, "_NET_WM_STATE",
                 [_STATE_ADD, self._atom(name), 0, _SOURCE_PAGER, 0],
             )
+        self._client_message(
+            wid, "_NET_WM_STATE",
+            [_STATE_ADD if above else _STATE_REMOVE,
+             self._atom("_NET_WM_STATE_ABOVE"), 0, _SOURCE_PAGER, 0],
+        )
 
     def activate(self, wid: int, timestamp: int) -> None:
         """Request activation.

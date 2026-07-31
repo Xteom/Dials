@@ -151,16 +151,44 @@ def test_apply_hints_always_sets_sticky_skip_taskbar_and_skip_pager():
             "_NET_WM_STATE_SKIP_PAGER"} <= props
 
 
-def test_apply_hints_adds_above_only_when_requested():
+def _above_action(display):
+    """The action byte of the one _NET_WM_STATE_ABOVE message sent, or None."""
+    actions = [ev.data[1][0] for ev, _ in display.sent
+               if display.get_atom_name(ev.data[1][1]) == "_NET_WM_STATE_ABOVE"]
+    assert len(actions) <= 1, "ABOVE must be addressed exactly once per call"
+    return actions[0] if actions else None
+
+
+def test_apply_hints_adds_above_when_requested():
     o, d = ops()
     o.apply_hints(0x500001, above=True)
-    props = {d.get_atom_name(ev.data[1][1]) for ev, _ in d.sent}
-    assert "_NET_WM_STATE_ABOVE" in props
+    assert _above_action(d) == 1                      # 1 = _NET_WM_STATE_ADD
 
-    o2, d2 = ops()
-    o2.apply_hints(0x500001, above=False)
-    props2 = {d2.get_atom_name(ev.data[1][1]) for ev, _ in d2.sent}
-    assert "_NET_WM_STATE_ABOVE" not in props2
+
+def test_apply_hints_explicitly_removes_above_when_not_requested():
+    """Not merely "does not add" - it must actively REMOVE.
+
+    _NET_WM_STATE messages are add/remove, never a whole-state assignment, so an
+    add-only implementation cannot undo itself. Changing a Dial from
+    on_focus_loss="above" to "normal" left the window pinned on top until the app
+    was restarted, with the config silently disagreeing with the screen. That is
+    what this asserts, and the previous version of this test - "ABOVE is not
+    among the atoms sent" - was satisfied by the broken behaviour.
+    """
+    o, d = ops()
+    o.apply_hints(0x500001, above=False)
+    assert _above_action(d) == 0                      # 0 = _NET_WM_STATE_REMOVE
+
+
+def test_apply_hints_never_removes_the_three_unconditional_panel_hints():
+    """Sticky/skip-taskbar/skip-pager are what make a Dial a panel at all."""
+    for above in (True, False):
+        o, d = ops()
+        o.apply_hints(0x500001, above=above)
+        for ev, _ in d.sent:
+            name = d.get_atom_name(ev.data[1][1])
+            if name != "_NET_WM_STATE_ABOVE":
+                assert ev.data[1][0] == 1, f"{name} must always be added"
 
 
 def test_activate_sends_the_supplied_timestamp_not_currenttime():
