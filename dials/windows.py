@@ -105,6 +105,13 @@ PANEL_HINTS = (
 _STATE_ADD = 1
 _SOURCE_PAGER = 2
 
+#: Bits 8-11 of _NET_MOVERESIZE_WINDOW's data.l[0]: x, y, width and height are
+#: all supplied. Bits 12-15 carry the source indication, hence the << 12 below.
+_MOVERESIZE_XYWH = 0xF00
+#: WM_SIZE_HINTS.win_gravity value StaticGravity: the x, y in the message is the
+#: CLIENT window's position, not the frame's. See `apply_geometry`.
+_STATIC_GRAVITY = 10
+
 
 class WindowOps:
     """EWMH reads and writes. Every method degrades rather than raising.
@@ -251,16 +258,53 @@ class WindowOps:
     # ---- writes ----------------------------------------------------------
 
     def apply_geometry(self, wid: int, rect: Rect) -> None:
-        """Ask for a rect. The app's size hints may win; that is accepted."""
-        try:
-            self._win(wid).configure(x=rect.x, y=rect.y,
-                                     width=rect.w, height=rect.h)
-            self.d.flush()
-        except Exception:
-            # A write that is supposed to succeed silently failing means
-            # Dials does nothing and nobody knows why - that deserves to be
-            # visible by default.
-            log.warning("apply_geometry failed for window %#x", wid, exc_info=True)
+        """Ask for a rect. The app's size hints may win; that is accepted.
+
+        Sent as _NET_MOVERESIZE_WINDOW with **StaticGravity** rather than as a
+        plain ConfigureRequest, so that this WRITE and `geometry()`'s READ mean
+        the same rectangle. `geometry()` reports the CLIENT origin (via
+        translate_coords), while mutter reads a NorthWest-gravity
+        ConfigureRequest's x, y as the position of the visible FRAME. On a
+        server-side-decorated window those differ by the titlebar height, so a
+        read -> write round trip walked the window DOWN the screen by 37 px every
+        time - and `dials capture` compounded another 37 px each run. Spotify, one
+        of the two Dials in config/config.reference.toml, is SSD, so this was the
+        default experience rather than a corner case.
+
+        All four candidates were measured on one window in
+        docs/probes/10-frame-extents-and-geometry-round-trip.py; the direction of
+        the offset was measured rather than derived, because a previous
+        coordinate-maths "fix" in this project was exactly backwards:
+
+            configure(x, y, w, h)                 client lands +37 in y, drifts
+            _NET_MOVERESIZE_WINDOW gravity 0      client lands +37 in y, drifts
+            _NET_MOVERESIZE_WINDOW NorthWest (1)  client lands +37 in y, drifts
+            _NET_MOVERESIZE_WINDOW Static  (10)   client lands EXACTLY, no drift
+
+        StaticGravity is a fixed point on an SSD window, on a CSD window with no
+        server frame at all, and on a MINIMIZED window - the last being the
+        daemon's most common SHOW path, so it had to be checked separately.
+
+        _SOURCE_PAGER is the same source indication the other writes use; EWMH
+        names pagers as the intended senders of this message, which is why this
+        was preferred over reading _NET_FRAME_EXTENTS and compensating: no extra
+        round trip, and nothing to keep in sync with the frame changing.
+
+        ONE target cannot be honoured, and it is a mutter constraint rather than
+        a bug here: mutter will not put a server-side titlebar off the top of the
+        screen, so an SSD client is clamped to y >= the top frame extent. Measured
+        on the reference config's own rect (`rect = [0.0, 0.0, 0.5, 1.0]`, i.e.
+        y = 0): asked 0/10/20/36 -> landed 37; asked 37/38/60/200 -> landed
+        exactly. Every one of those landings is still a FIXED POINT, so the drift
+        no longer compounds - which is the part that mattered. Do not "fix" this
+        by subtracting the extent: that would push the client further down, and
+        the WM would clamp it right back.
+        """
+        self._client_message(
+            wid, "_NET_MOVERESIZE_WINDOW",
+            [_STATIC_GRAVITY | _MOVERESIZE_XYWH | (_SOURCE_PAGER << 12),
+             rect.x, rect.y, rect.w, rect.h],
+        )
 
     def apply_hints(self, wid: int, above: bool) -> None:
         hints = list(PANEL_HINTS)

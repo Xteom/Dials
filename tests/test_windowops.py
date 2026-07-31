@@ -103,11 +103,44 @@ def test_panel_hints_are_the_three_unconditional_ones():
     )
 
 
-def test_apply_geometry_configures_the_window():
+def test_apply_geometry_asks_for_the_rect_with_static_gravity_and_pager_source():
+    """The WRITE has to mean the same rectangle as the READ.
+
+    geometry() reports the CLIENT origin; mutter reads a NorthWest-gravity
+    ConfigureRequest's x,y as the position of the visible FRAME. On a
+    server-side-decorated window - Spotify, in the shipped reference config -
+    those differ by the titlebar, so a read -> write round trip walked the
+    window 37 px down the screen every time and `dials capture` compounded
+    another 37 px per run. StaticGravity is what makes x,y the client's own
+    position; measured against all four candidates in
+    docs/probes/10-frame-extents-and-geometry-round-trip.py.
+    """
+    from Xlib import X
+
     o, d = ops()
     o.apply_geometry(0x500001, Rect(1720, 0, 1720, 1440))
-    w = d.windows[0x500001]
-    assert w.configured == {"x": 1720, "y": 0, "width": 1720, "height": 1440}
+
+    ev, mask = d.sent[-1]
+    assert d.get_atom_name(ev.client_type) == "_NET_MOVERESIZE_WINDOW"
+    flags, x, y, w, h = ev.data[1][:5]
+    assert flags & 0xFF == 10, "gravity must be StaticGravity (10)"
+    assert flags & 0xF00 == 0xF00, "x, y, width and height must all be flagged"
+    assert (flags >> 12) & 0xF == 2, "source indication must be pager"
+    assert (x, y, w, h) == (1720, 0, 1720, 1440)
+    assert mask == X.SubstructureRedirectMask | X.SubstructureNotifyMask
+
+
+def test_apply_geometry_never_sends_a_plain_configure_request():
+    """The mutant that would silently restore the 37 px drift.
+
+    A ConfigureRequest is the natural thing to reach for and reads correctly, so
+    nothing but an explicit assertion stops it coming back.
+    """
+    o, d = ops()
+    w = d.create_resource_object("window", 0x500001)   # a configure() would land here
+    o.apply_geometry(0x500001, Rect(100, 200, 300, 400))
+    assert w.configured is None, \
+        "configure(x=, y=) sets the FRAME position, not the client's - that was C2"
 
 
 def test_apply_hints_always_sets_sticky_skip_taskbar_and_skip_pager():
