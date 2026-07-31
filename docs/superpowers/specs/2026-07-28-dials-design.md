@@ -175,23 +175,36 @@ following `clip`'s established style.
 ```
 KeyPress(keycode, state == 0)
   -> keys.slot_for(keycode)                     "9"
-  -> config.dial("9")                           Dial(match_class="spotify", ...)
+  -> config.dial("9")                           Dial(match_class="Spotify", ...)
   -> windows.find(dial.match_class)             window id | None
-       None  -> launcher.arm_confirm(dial)      notify, grab Return+KP_Enter for 5s
+       None  -> launcher.arm_confirm(dial)      notify, grab Return for 5s
        found -> windows.read_state(win)
                   HIDDEN       -> SHOW   apply geometry + hints, then activate
-                  not FOCUSED  -> RAISE  activate only
+                  not FOCUSED  -> RAISE  apply hints (+geometry if pinned), activate
                   FOCUSED      -> HIDE   WM_CHANGE_STATE -> IconicState
 ```
 
 ### State machine
 
-| Window state | Action | Geometry re-applied |
-| --- | --- | --- |
-| not found | confirm-then-launch | — |
-| `_NET_WM_STATE_HIDDEN` (minimized) | apply geometry + hints, activate | yes |
-| visible, **not the active window** | activate only | only if `pin_geometry` |
-| visible and **is the active window** | iconify | — |
+| Window state | Action | Geometry re-applied | Hints re-applied |
+| --- | --- | --- | --- |
+| not found | confirm-then-launch | — | — |
+| `_NET_WM_STATE_HIDDEN` (minimized) | apply geometry + hints, activate | yes | yes |
+| visible, **not the active window** | apply hints, activate | only if `pin_geometry` | **yes** |
+| visible and **is the active window** | iconify | — | — |
+
+Hints are re-applied on a RAISE as well as a SHOW, and deliberately are **not**
+gated on `pin_geometry`: that setting governs position, and the hints are window
+properties. The distinction is load-bearing. A window that was already visible the
+first time the daemon saw it never goes through SHOW — every press on it is a RAISE
+— so gating hints on SHOW left such a window non-sticky and still in the switcher
+no matter how often its Dial was pressed.
+
+`_NET_WM_STATE_ABOVE` is also explicitly **removed** when `on_focus_loss` is not
+`"above"`, rather than merely not added. `_NET_WM_STATE` messages are add/remove,
+never a whole-state assignment, so an add-only implementation cannot undo itself:
+changing a Dial from `"above"` to `"normal"` would otherwise leave its window
+pinned on top until the application restarted.
 
 Three states rather than a strict two-state toggle, because a Dial with `on_focus_loss = "normal"`
 can be buried: pressing its key while it is buried must raise it, not hide it. A strict toggle would
@@ -274,9 +287,15 @@ This is the one behavior in the design that no probe covers, because XTEST canno
 reproduce server-generated autorepeat — it needs a physically held key, so it is an explicit
 first-run smoke test rather than a claim.
 
-Geometry is **not** re-applied on a plain raise, so hand-nudging a window is not undone on every
-keypress. `dials capture <slot>` saves the current position instead; `pin_geometry = true` opts a
-Dial into strict enforcement.
+`pin_geometry` decides whether geometry is re-applied on a plain raise. It ships **on**.
+
+The original reasoning was that leaving it off protects a hand-nudged window from being snapped back
+on the next keypress. In use that was the wrong trade: geometry is applied unconditionally on SHOW,
+i.e. when a window returns from minimised, but a window that was already visible the first time the
+daemon saw it never goes through SHOW — so with this off, no Dial ever placed it and it simply kept
+whatever size the application chose. A panel that does not place its window is not a panel. The
+accepted cost is the original concern: a hand-nudge is undone on the next press, and
+`dials capture <slot>` is how to make one permanent.
 
 ### Focus-loss behavior
 
@@ -509,11 +528,17 @@ in memory by the running daemon and never written to disk.
 monitor       = "HDMI-0"              # ultrawide; falls back to primary if unplugged
 rect          = [0.0, 0.0, 0.5, 1.0]  # x, y, w, h as fractions of the monitor
 on_focus_loss = "hide"                # normal | above | hide
-pin_geometry  = false
+pin_geometry  = true                  # see "Geometry" - ships on
 
 [dials."9"]
 label         = "Spotify"
-match_class   = "spotify"             # WM_CLASS *class* field (second field)
+match_class   = "Spotify"             # WM_CLASS *class* field (second field)
+                                      # CASE MATTERS. Spotify's WM_CLASS is
+                                      # ("spotify", "Spotify"): instance lower,
+                                      # class capitalised. Getting this wrong
+                                      # matches nothing, and the Dial then
+                                      # reports the app as not running and offers
+                                      # to launch a second copy of it.
 # must carry the scale flag, or the min-width workaround from spotify_width is lost
 launch        = "/snap/bin/spotify --force-device-scale-factor=0.7"
 icon          = ""                   # nerd font glyph; auto-guessed from .desktop if omitted
@@ -1026,6 +1051,16 @@ directory.
 - **Real bitmap app icons** in the TUI via the Kitty graphics protocol.
 - **Alt-tab-hidden but taskbar-visible** — impossible with EWMH hints alone, since mutter reads one
   flag for both. Would need a GNOME Shell extension.
+- **Alt-tab exclusion is not yet confirmed working on this desktop.** A Dial window was reported
+  still appearing in the switcher while already carrying `_NET_WM_STATE_SKIP_TASKBAR`,
+  `SKIP_PAGER` and `STICKY`. Guake, with the *identical* set of properties, stays out. The one
+  difference is timing: Guake sets the hints before its window is mapped, and Dials can only set
+  them afterwards, on a foreign window it does not own — so the suspicion is that GNOME Shell
+  registers the window before it sees the hint and does not re-evaluate. Two things were fixed on
+  the way to this conclusion (hints are now applied on RAISE, not only on SHOW; ABOVE is now
+  explicitly removed), and neither is confirmed to resolve the switcher symptom. If it persists,
+  the next step is not more hint-setting — it is establishing what GNOME Shell's switcher actually
+  filters on, on this exact Shell version, before changing anything else.
 - **Event-driven NumLock tracking** — needs an XKB binding python-xlib does not provide; revisit if
   the 1 Hz tray timer ever proves visible, or if `ctypes` becomes acceptable.
 - **Wayland / COSMIC support** — would mean moving key handling to `keyd` at the evdev layer and

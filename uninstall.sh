@@ -30,8 +30,11 @@ Dials removed. Every key grab was released when the daemon stopped, so the
 numpad is back to stock behaviour with NumLock off.
 
 Deliberately NOT deleted:
-  ~/.config/dials/config.toml        your live configuration
-  <repo>/config/config.reference.toml  version-controlled project content
+  ~/.config/dials/config.toml            your live configuration
+  <repo>/config/config.reference.toml    version-controlled project content
+  ~/.mozilla/firefox/*/user.js           the Firefox Dial's profile tuning -
+                                         never installed by us, so never removed
+                                         (see docs/FIREFOX-DIAL6.md)
 
 Nothing else was touched: no packages, no dconf keys, no X keymap changes, and
 no changes to Firefox's profiles.ini.

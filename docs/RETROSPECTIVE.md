@@ -7,7 +7,7 @@ those two cannot: what went wrong in the process itself.
 
 ## Outcome
 
-22 planned tasks, 382 tests, 0 skips. Most load-bearing X11 claims were verified on
+22 planned tasks, 394 tests, 0 skips. Most load-bearing X11 claims were verified on
 the target machine before being written down — the probe scripts in `docs/probes/`
 are that evidence and can be re-run if GNOME, Firefox or the monitor layout changes.
 
@@ -147,6 +147,33 @@ measured drift = 37 px). It compounded on every `capture`, and it hit Spotify �
 one of the two Dials actually shipped. Read/write asymmetry is invisible to any
 test that only checks one direction; the fix criterion is that the round trip be a
 **fixed point**.
+
+## The lesson that recurred anyway
+
+Everything above was written before the thing was installed and used. Daily use then
+found four more defects — recorded with their reasoning in
+`docs/IMPLEMENTATION-DECISIONS.md` section 8 — and one of them repeated a failure
+this file had already named.
+
+Two of those shared a root cause: geometry and window hints were applied on SHOW,
+and a window that was **already visible** the first time the daemon saw it never
+takes that path. It was therefore never placed and never made sticky, however often
+its Dial was pressed. Every test started from a minimised window, so the whole gap
+was invisible.
+
+Then the fix was covered only by a test on the pure predicate. Reverting the one
+line in its caller left **all 389 tests green** — the exact vacuous-coverage shape
+described three sections up, in new code, a day later. Knowing the pattern did not
+prevent it; only mutation-testing the call site caught it.
+
+Two habits follow, and both are cheaper than they sound:
+
+- **Test the state you actually have, not the state the design starts from.** "Runs
+  on show" is not "runs". A fixture that always begins minimised can only ever
+  prove the minimised path.
+- **When a fix is one line in a caller plus one function in a pure module, the
+  caller is where it will regress.** Mutate the call site and watch it fail before
+  believing the test.
 
 ## On adversarial review
 

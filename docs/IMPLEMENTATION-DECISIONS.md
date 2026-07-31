@@ -9,11 +9,16 @@ Three documents already exist and this one deliberately does not repeat them:
 | `docs/superpowers/specs/2026-07-28-dials-design.md` | The **design** and its rationale, settled before any code |
 | `docs/superpowers/plans/2026-07-30-dials*.md` | The task breakdown and the code as planned |
 | `docs/RETROSPECTIVE.md` | The **process** lessons and failure patterns |
+| `docs/FIREFOX-DIAL6.md` | Why the Firefox Dial's profile is tuned, and how |
 
 What none of them records is the set of decisions forced by **executing** the
 plan: what measurement contradicted, what was changed and why, what was
 deliberately *not* changed, and what each choice implies for anyone editing this
 code later. That is this document.
+
+Section 8 covers the changes made after first install, once the thing was in daily
+use. Those are the decisions the plan could not have anticipated, because they
+came from watching it run.
 
 Where a decision is already argued in the spec, it is named here only with its
 consequence, not re-argued.
@@ -273,7 +278,7 @@ worse failure than "exits too eagerly".
 
 Geometry, monitor selection, the action table, the focus state machine, window
 selection and config validation are pure and tested without a display. This is why
-382 tests run in under half a second and why the subtle logic could be
+394 tests run in under half a second and why the subtle logic could be
 mutation-tested at all.
 
 **Implication.** A handler that reaches for X directly instead of its injected seam
@@ -534,6 +539,115 @@ Four checks cannot be automated here and are listed in `README.md`:
 4. Hover the tray icon — the state logic is exhaustively tested; the on-screen
    tooltip string was never screenshot-confirmed.
 
-Nothing in this branch installs anything: no systemd unit enabled, no live config
-created, no process left running. `./install.sh` (with `--tray` for the indicator)
-is a deliberate user action, because activating this takes over 15 keys.
+Nothing in the *original* branch installed anything: no systemd unit enabled, no
+live config created, no process left running, because activating this takes over
+15 keys. It has since been installed deliberately with `./install.sh --tray`, and
+section 8 records what daily use then revealed.
+
+---
+
+## 8. Decisions from first use
+
+Everything above came from building the thing. This section came from running it,
+which found four defects no test could have — three of them because the tests
+asserted the design rather than the outcome.
+
+### 8.1 `match_class` is case-sensitive, and getting it wrong is silent
+
+Spotify's `WM_CLASS` is `("spotify", "Spotify")`: instance lowercase, class
+capitalised. The shipped config matched lowercase `spotify` against the *class*
+field, so it matched nothing — and the Dial then reported Spotify as not running
+while it was on screen, offering to launch a second copy.
+
+**Implication.** A wrong `match_class` is indistinguishable from "the app is
+closed", which is the most confusing possible failure: the feature appears to work
+and simply disagrees with reality. `xprop WM_CLASS` on the real window is the only
+way to be sure, and the second field is the one that matters.
+
+### 8.2 An already-visible window never went through SHOW, so it was never set up
+
+The single root cause behind two separate complaints — "it opens at full screen"
+and "it still shows in alt-tab".
+
+Geometry and hints were both applied on SHOW. But SHOW only happens when a window
+comes back from minimised, and a window that was *already visible* the first time
+the daemon saw it never takes that path — every press on it is a RAISE or a HIDE.
+So such a window was never placed and never made into a panel, no matter how many
+times its Dial was pressed.
+
+Two different fixes, because the two settings are not the same kind of thing:
+
+- **Geometry** is position, so it stays under `pin_geometry` — but that now ships
+  **on**. Leaving it off was protecting a hand-nudged window from being snapped
+  back, which turned out to be the wrong trade: a panel that never places its
+  window is not a panel. The nudge concern is real and is now the accepted cost,
+  with `dials capture <slot>` as the way to make one permanent.
+- **Hints** are window properties, so they are re-applied on SHOW *and* RAISE and
+  are deliberately not gated on `pin_geometry` at all. A test asserts
+  `reapply_hints` takes only the action, because adding a `pin_geometry` parameter
+  would silently stop excluding pinned-off Dials from the switcher.
+
+**Implication.** "Applied on show" is not the same as "applied", and the gap is
+invisible in tests that start from a minimised window — which every test did.
+
+### 8.3 `_NET_WM_STATE` is add/remove, so add-only code cannot undo itself
+
+`apply_hints` only ever *added* `_NET_WM_STATE_ABOVE`. Changing a Dial from
+`on_focus_loss = "above"` to `"normal"` therefore left its window pinned on top
+until the application restarted, with the config silently disagreeing with the
+screen. It now sends an explicit REMOVE.
+
+**Implication.** For any add/remove protocol, "set to false" has to be written as
+an operation, not as the absence of one. The old test — "ABOVE is not among the
+atoms sent" — was satisfied by the broken behaviour; the replacement asserts the
+action byte.
+
+### 8.4 A predicate test is not a call-site test
+
+Both 8.2 fixes were first covered only by tests on the pure predicate in
+`panels.py`. Reverting `daemon.py` to the buggy `if action == panels.SHOW:` left
+**all 389 tests green**. This is the same vacuous-coverage shape already recorded
+in `RETROSPECTIVE.md`, recurring in new code.
+
+**Implication.** When a fix is one line in a caller and one function in a pure
+module, the caller is where the bug can come back. Mutation-test the call site,
+not just the predicate. Three daemon-level tests now fail if that line regresses.
+
+### 8.5 The tray icon is generated, and fitted by measurement
+
+The first shell was a scallop, which is the wrong animal — a Dial is a conch. The
+replacement is a logarithmic spiral, which cannot be hand-authored: the constants
+live in `icons/generate.py` and the SVG is output.
+
+Three things were learned the hard way and are pinned by comments or tests:
+
+- **gdk-pixbuf identifies an image by sniffing its leading bytes**, so a comment
+  long enough to push `<svg` out of that window makes the icon fail to load as
+  "unrecognised format" — a broken image in the panel with nothing wrong in any
+  log. Measured: an 11-byte leading comment loads, a ~470-byte one does not.
+  `tests/test_tray.py` asserts `<svg ` is at byte 0.
+- **A flat spiral has a circular silhouette**, and at 22px the silhouette is all
+  you get, so it read as a disc. The coil is rotated and squashed on one axis to
+  give it a conch's spindle profile.
+- **The icon must be fitted, not positioned.** It first filled ~62% of the
+  viewBox and looked shrunken beside every other indicator. `_fit` measures the
+  drawn bounding box — including half of each stroke width, which a naive path
+  bbox misses, and omitting it clipped the widest whorl — and emits the transform.
+  Resizing is now one constant.
+
+### 8.6 Two Dials may share one rect
+
+Spotify and Slack both occupy the right half of the ultrawide. That is a supported
+pattern, not a collision: one screen region, two keys, one window up at a time.
+Nothing special-cases a Dial appearing over another, because showing one is an
+ordinary focus change — which is why this needed no code at all.
+
+### 8.7 Known rough edge: an app that minimises to the tray reads as "not running"
+
+Flatpak Slack unmaps its window and drops out of `_NET_CLIENT_LIST` when it
+minimises to the system tray. `list_windows()` correctly does not see it, so the
+Dial reports "not running" and offers to launch. Confirming happens to work, since
+Slack is single-instance and re-running it restores the window — but the message
+is wrong. Left as-is: distinguishing "closed" from "hidden in a tray" needs a
+per-application notion of liveness that this design does not have, and the
+consequence is a misleading sentence rather than a broken action.

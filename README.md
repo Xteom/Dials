@@ -66,12 +66,20 @@ probe and gone by the next. An absent monitor falls back to primary.
 - `~/.local/share/dials/venv/`
 - `~/.config/dials/config.toml` — seeded from the reference copy only if absent
 - `~/.local/state/dials/` (pause flag, tray PID)
+- `~/.local/share/icons/hicolor/scalable/apps/dials-shell*.svg` — the three tray
+  icons. They live in the icon theme because the tray looks them up by *name*; a
+  path inside the repo would not be discoverable and would break if the checkout
+  moved.
 
 No apt packages, no dconf keys, no X keymap changes, no changes to Firefox's
 `profiles.ini`.
 
+The Firefox Dial's own profile is a separate matter: it has hand-written tuning at
+`~/.mozilla/firefox/<profile>/user.js` that neither script installs or removes.
+See `docs/FIREFOX-DIAL6.md`.
+
 `./uninstall.sh` stops and disables both units, deletes them, and removes the
-venv and `~/.local/state/dials/`. It deliberately **keeps
+venv, the three tray icons, and `~/.local/state/dials/`. It deliberately **keeps
 `~/.config/dials/config.toml`** — that file is your configuration, not
 installer-owned state, so delete it by hand if you want it gone. Stopping the
 daemon releases every grab immediately, so the numpad is back to stock behaviour
