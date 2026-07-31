@@ -1,0 +1,539 @@
+# Implementation decisions — Dials
+
+## What this document is for
+
+Three documents already exist and this one deliberately does not repeat them:
+
+| Document | Covers |
+| --- | --- |
+| `docs/superpowers/specs/2026-07-28-dials-design.md` | The **design** and its rationale, settled before any code |
+| `docs/superpowers/plans/2026-07-30-dials*.md` | The task breakdown and the code as planned |
+| `docs/RETROSPECTIVE.md` | The **process** lessons and failure patterns |
+
+What none of them records is the set of decisions forced by **executing** the
+plan: what measurement contradicted, what was changed and why, what was
+deliberately *not* changed, and what each choice implies for anyone editing this
+code later. That is this document.
+
+Where a decision is already argued in the spec, it is named here only with its
+consequence, not re-argued.
+
+---
+
+## 1. Decisions forced by measuring X, not reasoning about it
+
+Every claim in this section was verified on the target machine. The probe scripts
+in `docs/probes/` are the evidence and can be re-run.
+
+### 1.1 Grab the cross product of tolerated lock modifiers, never `mod2`
+
+X matches passive-grab modifier masks **exactly**. A mask-0-only grab therefore
+stops matching the moment any *other* lock modifier is active: with CapsLock on,
+every Dial silently died. Measured, then fixed by grabbing `{0, LockMask}` — 32
+grabs for 16 keycodes — with the tolerated set derived at runtime from
+`get_modifier_mapping()` rather than hardcoded.
+
+**Implication.** Adding a key means adding masks, not just a keycode. The set must
+never include whichever modifier holds `Num_Lock`, because that exclusion *is* the
+project: include it and Dials fire while NumLock is on and the numpad stops typing
+digits. `tests/test_grab.py` guards both halves, including the one input where the
+guard is decisive (a modifier row holding `Num_Lock` **and** a tolerated key).
+
+### 1.2 A same-client duplicate `GrabKey` is a silent replace, not `BadAccess`
+
+The most expensive wrong belief in the project, and it was mine. The code, its
+comments and its tests all asserted that grabbing an already-grabbed keycode
+returns `BadAccess`, and concluded the temporary confirm-grab manager could never
+disturb the permanent grabs. Measured:
+
+```
+client A, first grab                      OK
+client A, SECOND grab (same kc + mask)    OK          <- silent replace
+client B grabbing while A holds it        BadAccess   <- cross-client only
+client B after ONE ungrab from A          OK          <- A's grab fully removed
+```
+
+`BadAccess` is a *cross-client* protection. The daemon and its temporary
+`GrabManager` share one `Display`, so `KP_Enter` really was being grabbed and then
+ungrabbed, deleting the permanent enter-slot grab on **every** confirmation cycle.
+
+**Decision.** The temporary manager grabs `Return` only (`grab_keycodes()`).
+`KP_Enter` is already permanently grabbed, so the daemon already receives it and
+`is_confirm()` still accepts it (`confirm_keycodes()`). "What confirms" and "what
+must be temporarily grabbed" are now separate accessors that document each other,
+because conflating them is what caused this. Evidence:
+`docs/probes/09-duplicate-grab-same-client.py`.
+
+**Implication.** Never create a second `GrabManager` over keycodes the first one
+holds on the same connection. If two managers must ever coexist, ownership has to
+be tracked explicitly — but the better answer is not to need it.
+
+**Knock-on, accepted.** The abandon guard — refuse to arm if `Return` could not be
+grabbed at all — is now *conservative* rather than forced, because `KP_Enter`
+remains permanently grabbed and could in principle still confirm. It was kept
+anyway: it is the only path that tells you `Return` was taken by another client,
+and arming while saying "press Enter" when the obvious key is contended is worse
+than declining. The comment says so rather than implying the guard is necessary.
+
+### 1.3 Geometry read and write disagree by the window frame
+
+`geometry()` returns the **client** origin (`translate_coords`); `configure()` is
+interpreted by mutter as the **frame** position under NorthWest gravity. For
+server-side-decorated windows those differ by the titlebar. Measured:
+
+```
+_NET_FRAME_EXTENTS (l,r,t,b) : [0, 0, 37, 0]
+client origin before          : (488, 1617, 500, 360)
+client origin after round trip: (488, 1654, 500, 360)   drift dy = 37
+```
+
+Spotify — one of the two shipped Dials — is SSD with exactly those extents, so
+every show placed it 37 px low and every `capture` compounded another 37 px.
+
+**Decision.** Position with `_NET_MOVERESIZE_WINDOW` carrying **`StaticGravity`**
+and the pager source indication, not a plain `ConfigureRequest`. Four candidates
+were measured on one real SSD window before choosing — plain `configure()`, and
+`_NET_MOVERESIZE_WINDOW` with gravity 0, NorthWest, and Static:
+
+| Mechanism | Lands where asked | Fixed point |
+| --- | --- | --- |
+| `configure()` | no, `dy=+37` | no, drifts `+37` again |
+| MOVERESIZE gravity 0 | no, `dy=+37` | no |
+| MOVERESIZE NorthWest | no, `dy=+37` | no |
+| **MOVERESIZE Static** | **yes** | **yes** |
+
+Static is a fixed point on SSD, on CSD (no frame at all), and on a *minimized*
+window — which matters, because that is the show path. Evidence:
+`docs/probes/10-frame-extents-and-geometry-round-trip.py`.
+
+**Implication.** The acceptance criterion for any geometry change is that
+`geometry()` → `apply_geometry()` is a **fixed point**: a window told to go where
+it already is must not move. Assert that, not just "the numbers look right".
+Compensating by subtracting the frame extent would have been the wrong fix — the
+docstring warns against it explicitly — because it works only for SSD windows and
+breaks CSD ones.
+
+**One residual, and it is mutter's, not ours.** mutter refuses to draw a
+server-side titlebar off the top of the screen, so an SSD client is clamped to
+`y >= top extent`: asked `y = 0/10/20/36` all land at 37, while `y >= 37` lands
+exactly. So the reference config's `y = 0` Spotify rect still shows its client
+37 px down — but *once*, deterministically, and `capture` no longer accumulates,
+which was the actual bug. Every clamped landing is still a fixed point.
+
+### 1.4 `pending_events()` drains the socket — do not "fix" the event loop
+
+An external review called the drain loop critical and proposed
+`range(max(1, pending_events))`. Measured before acting: `pending_events()` calls
+`send_and_recv(recv=1)`, so it *reads* the socket and reports resulting events; an
+idle connection fired `select()` 0/3 times, so there was no spin; and
+`next_event()` on an empty queue **blocks indefinitely**. The proposed fix would
+have frozen every Dial and every timeout.
+
+A `0` means the readable bytes were a reply or error, already consumed — returning
+to `select()` is correct. The loop carries a comment saying exactly this, because
+the same change was proposed twice.
+
+**But the snapshot count was still wrong**, for a different reason. Handlers make
+dozens of synchronous round trips (`list_windows()` is ~5 per window) and
+python-xlib queues events that arrive while it waits for those replies. Those
+events were not in the snapshot and the socket was already drained, so the loop
+returned to a `select()` that blocks with a `None` timeout — and a focus-change
+`PropertyNotify` swallowed mid-handler could wait indefinitely, leaving an
+`on_focus_loss="hide"` panel visible until some unrelated event arrived.
+
+**Decision.** Drain *while* `pending_events()` is non-zero, which never calls
+`next_event()` on an empty queue and therefore cannot block.
+
+**Implication.** These two changes look nearly identical and differ decisively:
+`range(max(1, pending))` blocks forever, `while pending_events()` cannot. The
+comment in the loop distinguishes them by name, because the dangerous one was
+proposed twice.
+
+### 1.5 `translate_coords`' operand order was already right
+
+The same review called the coordinate maths inverted and proposed swapping the
+operands. Verified against `xwininfo` ground truth: as shipped it returned
+`(742, 418)`, matching truth; the proposed swap returned `(-742, -418)`. In
+python-xlib `self` is the **destination**. Applying that "fix" would have created
+the exact bug it warned about.
+
+### 1.6 `keysym_to_string` mis-reports some keysyms rather than returning `None`
+
+It carries an explicit special-case list — `BackSpace`, `Tab`, `Clear`, `Return`,
+`Pause`, `Escape`, `Delete`, **`Scroll_Lock`** — for which it returns
+`chr(keysym & 0xff)`. So `Scroll_Lock` yields a truthy `'\x14'`, which shadowed the
+authoritative name table in an `or` chain and silently dropped ScrollLock's
+modifier from the tolerated set. `NoSymbol` (keysym 0) is likewise truthy as
+`'\x00'`.
+
+**Decision.** The table is consulted **first**, with an explicit `if not ks` guard
+for `NoSymbol`.
+
+**Implication.** Any keysym→name lookup here must be table-first. Latin-1
+convenience functions are not a safe default for lock keys.
+
+### 1.7 `_NET_WM_STATE_FOCUSED` is a decoration hint, not a focus flag
+
+EWMH permits a WM to set it on several windows at once, so it cannot be the toggle
+predicate. `_NET_ACTIVE_WINDOW` is single-valued by definition and is used
+instead. On this mutter the property *did* behave exclusively when tested — the
+stricter predicate was adopted anyway, because correctness by specification beats
+correctness by observed behaviour the WM is not obliged to keep.
+
+### 1.8 Activation is a request the WM may refuse
+
+Confirmed accidentally and then deliberately: a de-iconified window did **not** win
+`_NET_ACTIVE_WINDOW` when activated with a wall-clock timestamp. Hence three
+decisions — send the triggering `KeyPress.time` (never `CurrentTime`), use source
+indication 2 (pager), and **verify** the outcome rather than assume it.
+
+**Implication.** The hide guard arms only once the active window has been *observed*
+to equal the Dial's window. Arming on "we sent the request" is the bug this design
+exists to prevent: a hide-on-focus-loss Dial would hide itself the instant it
+appeared.
+
+### 1.9 Nothing on this system reserves screen space
+
+No managed window sets `_NET_WM_STRUT`; `_NET_WORKAREA` equals the full root box.
+cosmic-dock is `dock-fixed=false` with autohide and intellihide, so it never
+publishes struts.
+
+**Decision.** Geometry resolves against the raw monitor rect. An earlier draft
+intersected every monitor with `_NET_WORKAREA`, which is *wrong*: that property is
+one desktop-wide rectangle, so a panel reserving one edge would have shrunk
+monitors it never touched. The "it's free and starts working automatically"
+justification was itself the error — it was not free, only invisible while every
+inset is zero.
+
+**Implication.** If reserved space ever appears, aggregate
+`_NET_WM_STRUT_PARTIAL` per monitor. Do not reach for `_NET_WORKAREA`.
+
+### 1.10 python-xlib version drift is real
+
+Probes ran against the system's 0.29; the venv installs 0.33. `keysym_to_string`
+behaves identically in both, but `randr.get_monitors` is **absent in 0.29 and
+present in 0.33**. The RandR 1.2 path is kept deliberately, because the project's
+floor is `python-xlib>=0.29` and 1.2 is therefore the portable choice — and because
+1.2 enumerates *outputs*, which is why CRTC deduplication is required at all.
+
+**Implication.** Any comment citing a library capability must name the version it
+was checked against. Two documents disagreed on this until corrected.
+
+### 1.11 XKB is unreachable, so the tray polls and nothing else does
+
+The server has `XKEYBOARD` but python-xlib ships no XKB binding, so
+`XkbSelectEvents` is out of reach without `ctypes`. NumLock state cannot be watched
+event-driven.
+
+**Decision.** The tray reads `led_mask` on a 1 Hz timer, and it is opt-in
+*because* of that. Grabbing `Num_Lock` and replaying it was rejected: its failure
+mode is NumLock stopping working, which is far worse than a 23 µs read.
+
+---
+
+## 2. Architectural decisions and what they cost
+
+### 2.1 One `select()` with every deadline folded in
+
+The daemon blocks on the X file descriptor with a `None` timeout whenever nothing
+is armed. Every timeout — assign 5 s, confirm 5 s, launch-wait 10 s, activation
+1.5 s — is expressed as that one timeout. There is no periodic timer anywhere.
+
+**Measured: 0.000 % idle CPU, 0.0 voluntary context switches per second.**
+
+**Implication.** Adding any feature that needs a timer must fold into
+`select_timeout()`, and must return `None` when idle. A `sleep()` loop or a
+recurring tick would forfeit the project's headline property. The 10 s launch wait
+is deliberately *not* a sleep for exactly this reason.
+
+### 2.2 A signal wakeup fd, because `select()` ignores signals
+
+Under PEP 475 `select()` is auto-retried after a handler returns, so
+`except InterruptedError` was dead code and — with a `None` timeout at idle — a
+`SIGHUP` was invisible indefinitely. Measured: a full 3.01 s block while the
+handler had already run at 0.4 s.
+
+Worse than latency: because the reload check sits at the top of the loop, the first
+Dial keypress after `dials pause` was what woke the loop, and it was *dispatched
+before the pause engaged* — precisely backwards for a safety valve. A
+`signal.set_wakeup_fd` self-pipe in the select set fixed both (0.40 s).
+
+### 2.3 A dead X connection must exit, not spin
+
+A peer-closed socket is permanently readable while yielding no events — measured 5
+of 5 ready in 0.000 s — so the loop would spin at 100 % CPU with no exit. The
+daemon now catches `ConnectionClosedError` *and* keeps a bounded
+readable-but-eventless guard, exiting non-zero so `Restart=on-failure` and
+`PartOf=graphical-session.target` bring it back with the next session.
+
+**Implication.** In a project whose requirement is 0 % idle CPU, "cannot exit" is a
+worse failure than "exits too eagerly".
+
+### 2.4 Pure logic separated from X I/O, with I/O injected
+
+Geometry, monitor selection, the action table, the focus state machine, window
+selection and config validation are pure and tested without a display. This is why
+382 tests run in under half a second and why the subtle logic could be
+mutation-tested at all.
+
+**Implication.** A handler that reaches for X directly instead of its injected seam
+becomes untestable — this happened once (`capture`), and the symptom presented as
+"missing tests" rather than as a design problem. If a seam exists, use it.
+
+### 2.5 GTK never enters the daemon, and an automated guard enforces it
+
+The tray and confirm dialog are separate processes. A subprocess test asserts that
+importing `dials.daemon` pulls in none of `tomli_w`, `curses`, `gi`, `dials.tui`,
+`dials.tray` or the TOML writer. It **must** run in a subprocess, because the test
+suite imports several of those itself and an in-process check passes vacuously.
+
+**Implication.** The ≤16 MB budget depends on that graph. For most of this project
+the guard existed only as a claim I repeated — a single manual check, with three UI
+modules landing afterwards. Assertions about resource behaviour need tests, not
+memory.
+
+### 2.6 Config: two plain files, no symlink
+
+The live config is `~/.config/dials/config.toml`; the repo's
+`config/config.reference.toml` is a snapshot nothing reads, refreshed by
+`dials config export`. An earlier design symlinked the XDG path into the repo,
+which made the running system depend on the project folder's location and required
+a dangling-link failure mode, a `--relink` repair command and a health check —
+three pieces of machinery existing only to support the link.
+
+**Implication.** Mirroring is manual on purpose: automatic sync would mean the
+daemon writing into a git working tree.
+
+### 2.7 Writes are atomic, and every writer re-reads first
+
+Temp file in the *same directory* (so `os.replace` stays on one filesystem),
+`flush`, `fsync`, rename. Every write re-reads and merges, so a TUI session left
+open in another terminal cannot silently revert a Dial written elsewhere.
+
+**Implication.** A dropped `fsync` is not detectable by any test on tmpfs —
+verified by mutation, 341 tests stayed green. That durability property is
+code-review-only, which is why it is written down here.
+
+---
+
+### 2.8 "I could not read that" is a distinct value, not an empty list
+
+`list_windows()` returned `[]` both for "this app has no windows" and for "the read
+failed", while its own comment forbade exactly that conflation — an empty list makes
+a Dial look unlaunched, so a keypress on a *running* app takes the LAUNCH branch and
+confirming yields a duplicate instance.
+
+**Decision.** Unknown is `None`; callers treat `None` as "do nothing this event"
+rather than as "no windows".
+
+**Implication.** This is the same class of bug as §4.3 and §1.6 — a sentinel that
+is indistinguishable from a legitimate value. When a read can fail, the failure
+needs its own representation, and `[]`, `0`, `False` and `""` are all
+disqualified by being plausible successes.
+
+## 3. Behavioural decisions
+
+### 3.1 Three states, not a two-state toggle
+
+Hidden → show; visible but not active → **raise**; visible and active → hide. A
+Dial that can be buried must surface on one press, not two.
+
+### 3.2 `on_focus_loss` is one setting with three values
+
+`normal` / `above` / `hide`. "Can be buried" and "hides when focus leaves" are
+mutually exclusive — hiding on focus loss means it can never be buried — so they
+are values of one knob, not two flags.
+
+### 3.3 Overlapping Dials are resolved by ordinary focus rules
+
+There is no "one Dial at a time" mode. Showing a Dial is an ordinary focus change,
+so a `hide` Dial hides, a `normal` one is buried, an `above` one stays up. This
+removed code rather than adding it: nothing special-cases "another Dial".
+
+### 3.4 Assign mode snapshots at `.` press
+
+The captured window, class, monitor and rect are frozen when `.` is pressed, which
+is what allows the overwrite dialog to take focus without changing what gets
+bound. `resolve()` only *describes* the outcome; an occupied slot yields an
+`OverwriteRequest` and persists nothing until confirmed.
+
+`Escape` is deliberately not the cancel key — grabbing it would steal Escape
+system-wide for five seconds. Pressing `.` again cancels.
+
+### 3.5 A modal for destruction, a notification for a launch
+
+Overwriting a Dial destroys one, so it gets a real focused window that shows both
+sides and can be refused — and because it holds focus it needs **no global grabs at
+all**. Launching is harmless and must not steal focus, so it gets a notification
+plus a brief key grab. The two flows differ on purpose.
+
+**Accepted risk, recorded.** Because that notification does not take focus, an
+`Enter` pressed for an unrelated reason inside the 5 s window can confirm a launch.
+This is a *new* accidental-launch path, mildly at odds with why confirmation was
+wanted. Confirming with the same Dial key again would avoid grabbing `Return`
+entirely; `Enter` was implemented because it was explicitly requested.
+
+### 3.6 A Dial with no launch command does not arm at all
+
+Arming used to happen for any not-found window, and the notification promised
+"press Enter to launch it" without checking whether a command existed — only
+`confirm()` noticed there was nothing to run. Since assign mode always produces
+`launch=None`, **most user-created Dials** would take `Return` from the focused
+application for five seconds and then say something untrue.
+
+**Decision.** No launch command means no arming, no grab, and an honest message.
+
+**Implication.** The intrusive part of this design — a global `Return` grab — now
+only happens when it can actually accomplish something. This was the cheapest of
+the five fixes and the one most likely to have been hit in daily use.
+
+### 3.7 A launch timeout never kills the process
+
+An app that shows its window at 11 s is a better outcome than a killed one.
+
+### 3.8 Window selection is deterministic, and ids are never persisted
+
+Managed windows matching the class field of `WM_CLASS`, excluding dialogs,
+utilities, splashes, menus, tooltips and override-redirect; then prefer the active
+window, then most-recently-active, then the **lowest id** purely for stability. A
+transient owned by the chosen window counts as part of the Dial's group, which is
+what stops a Dial hiding itself while its own dialog is open.
+
+**Implication.** Nothing asserted that the *class* field (index 1) was used rather
+than the instance field until late — mutating it to index 0 survived all 341 tests,
+and would have broken all 15 Dials at once on a real desktop while CI stayed green.
+
+### 3.9 Firefox gets a dedicated profile
+
+Firefox refuses two instances on one profile, so a reliably identifiable panel
+window needs its own profile plus `--class`. Referenced by name (`-P dial6`) rather
+than by absolute path, to keep a machine-specific directory hash out of config.
+
+**Implication.** `match_class` must stay in sync with `--class` in `launch`. That
+pairing is the one thing not to break when editing that Dial.
+
+### 3.10 Launch commands expand `~` and `$VARS`
+
+They run without a shell (`shlex.split` then `Popen`), so nothing would otherwise
+expand them and a `launch` line containing `~/.mozilla/...` would hand the app a
+literal `~` directory. Expansion handles the `--opt=~/path` form too, because
+`expanduser` only expands a *leading* tilde. An unset variable is left untouched so
+a typo fails loudly rather than silently dropping an argument.
+
+---
+
+## 4. Decisions I got wrong and revised
+
+Recorded because the reasoning errors are more reusable than the fixes.
+
+### 4.1 Three resource budgets measured the wrong thing
+
+- The tray's polling was justified with a *real* measurement — one `led_mask` read
+  at 28.4 µs — while the tick actually forked `pgrep` at **17.6 ms**, 756× more,
+  once a second. A precise measurement of the cheap half gave the design a false
+  clean bill of health. Fixed by caching the PID and re-checking
+  `/proc/<pid>/comm` (6 µs), which is also *more* correct than `pgrep -x dialsd`,
+  since that matches any process of that name.
+- `≤16 MB` and `≤45 MB` were stated against **RSS**, where most of both figures is
+  shared libraries. PSS is the honest metric: daemon 10.6 MB, tray 24.8 MB.
+- The tray's `≤0.01 % CPU` came from tick arithmetic that ignored
+  `Gtk.StatusIcon`'s own mainloop, which *is* the entire 0.055 % residual and is
+  outside any code here.
+
+**Implication.** Measure the whole tick, not the interesting part of it; and name
+the metric, because RSS and PSS answer different questions.
+
+### 4.2 I asserted `BadAccess` where the truth was a silent replace
+
+Section 1.2. The failure mode worth remembering is not the X detail but the
+propagation: I stated it confidently, an implementer built on it, a reviewer
+"verified the chain" — against the Python code rather than the server — and a test
+was written asserting the broken behaviour as correct. **A confident upstream
+assertion can defeat every downstream check.** Anything load-bearing about X now
+gets a probe in `docs/probes/` that a test references.
+
+### 4.3 A safety fallback that hides total breakage
+
+Four times, a `try/except` written to "degrade never crash" was the thing
+preventing anyone from noticing a feature was completely dead — most starkly the
+confirm dialog, where an unpinned `Gdk` import failed against Gtk 3.0 and the
+fallback reported a plausible "Dial not replaced" forever.
+
+**Implication.** The spec said errors must be **logged** and swallowed. Silent
+degradation and silent failure are indistinguishable from outside. If a handler
+swallows, it must say so — and the severity must split by kind: `debug` for reads
+that can legitimately race a dying window, `warning` for writes expected to
+succeed.
+
+### 4.4 `install.sh` claimed idempotency it did not have
+
+`uv venv` refuses an existing venv, and the script's own closing message invites a
+re-run with `--tray`. Following its advice failed at step two. `--allow-existing`
+reuses the venv and preserves the editable install; `--clear` was rejected because
+it would wipe it.
+
+### 4.5 Documents that contradicted each other
+
+The README stated measured footprints honestly while the spec's budget table still
+asserted the original figures; the README listed the live config under "what it
+touches" and then said uninstall reverses everything, when uninstall deliberately
+preserves it. Both corrected.
+
+---
+
+## 5. Findings rejected, with the counter-evidence
+
+Recorded so they are not re-litigated. Each was proposed confidently by an
+adversarial reviewer and each was measured before being declined.
+
+| Proposed | Why declined |
+| --- | --- |
+| `translate_coords` operands are inverted | As shipped matches `xwininfo` truth (742, 418); the swap yields (−742, −418) |
+| Force a read with `range(max(1, pending_events))` | `next_event()` on an empty queue blocks indefinitely; would freeze every Dial |
+| Atom interning is a resource-budget violation | `intern_atom` caches (8.3× cold/warm) and `apply_hints` runs only on a keypress; the budget concerns *idle* |
+| The "do not change this" comment is over-defensive | It exists because that exact change was proposed twice and would hang the daemon |
+| Trackers for removed Dials leak unboundedly | Keyed by slot, so bounded at 16, and `reload()` clears the dict wholesale |
+
+---
+
+## 6. Deliberately deferred, with implications
+
+- **Only one launch may be pending.** Confirming a second launch before the first
+  app's window appears orphans the first. Needs tight timing and self-corrects (the
+  app is now running, so its Dial does show/raise). Multi-pending would ripple
+  through launcher, daemon and tests.
+- **`_monitor_containing` uses the centre point.** A window straddling two monitors
+  may be assigned to the one you would not expect. Max-overlap is an improvement,
+  not a defect — and rewriting live geometry maths at merge time is the wrong risk.
+- **`dials status` reports no grab conflicts, monitor fallbacks or geometry
+  mismatches.** Those live in daemon memory with no channel to the CLI. Closing it
+  needs a state file or D-Bus. Documentation was corrected to stop promising them.
+- **Geometry-mismatch detection is not merely unimplemented but unimplementable as
+  designed**, because nothing reads back the geometry the WM granted.
+- **The TUI fails below roughly 25–28 terminal rows** (`addwstr` error). Loud,
+  non-destructive, and it will bite someone on a 24-row default.
+- **`notify()` blocks the loop for up to 1 s.** Reduced from 5 s. A wedged
+  notification daemon still costs responsiveness; the 5 s freeze it replaced was
+  worse.
+- **Geometry is applied at map time now, not focus time**, since
+  `_NET_CLIENT_LIST` arrives first. An app that sizes itself after mapping could
+  clobber a Dial's rect on first launch — strictly better than the previous
+  behaviour of never adopting a window that lost the focus race.
+
+---
+
+## 7. What still needs a human
+
+Four checks cannot be automated here and are listed in `README.md`:
+
+1. Press a Dial with **CapsLock on** — the regression guard for §1.1.
+2. **Physically hold** a Dial key — XTEST cannot reproduce server autorepeat, so the
+   debounce is unit-tested but not end-to-end verified.
+3. Plug or unplug a monitor — RandR hotplug subscription is verified as *registered*,
+   not as *received*.
+4. Hover the tray icon — the state logic is exhaustively tested; the on-screen
+   tooltip string was never screenshot-confirmed.
+
+Nothing in this branch installs anything: no systemd unit enabled, no live config
+created, no process left running. `./install.sh` (with `--tray` for the indicator)
+is a deliberate user action, because activating this takes over 15 keys.

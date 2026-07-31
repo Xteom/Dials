@@ -7,10 +7,14 @@ those two cannot: what went wrong in the process itself.
 
 ## Outcome
 
-22 planned tasks, 360 tests, 0 skips. Every load-bearing X11 claim was verified
-on the target machine before it was written down — the eight probe scripts in
-`docs/probes/` are that evidence and can be re-run if GNOME, Firefox or the
-monitor layout changes.
+22 planned tasks, 382 tests, 0 skips. Most load-bearing X11 claims were verified on
+the target machine before being written down — the probe scripts in `docs/probes/`
+are that evidence and can be re-run if GNOME, Firefox or the monitor layout changes.
+
+**Two were not, and both were wrong.** They are the subject of the section below,
+and they are the most useful thing in this file: the discipline was in place, and
+the two claims that escaped it were the two I asserted from memory rather than
+measured. A rule you apply to others' claims and not your own is not a rule.
 
 The headline architectural claim was measured, not asserted: the daemon idles at
 **0.000 % CPU and 0.0 voluntary context switches per second**, because it blocks
@@ -98,6 +102,51 @@ fault:
 
 `README.md` states the measured values; the spec's budget table was corrected to
 match rather than left contradicting it.
+
+## The worst failure: a confident assertion that defeated every later check
+
+Found only by a third review pass, run deliberately with **no project context** —
+no spec, no plan, no mention of prior reviews or known defects.
+
+I told an implementer that a duplicate `XGrabKey` for a keycode this client already
+holds returns `BadAccess`, and that the temporary confirm-grab manager was therefore
+"safe by construction". Measured on the target machine:
+
+```
+client A, first grab                      OK
+client A, SECOND grab (same kc + mask)    OK          <- silent replace
+client B grabbing while A holds it        BadAccess   <- cross-client only
+client B after ONE ungrab from A          OK          <- A's grab fully removed
+```
+
+`BadAccess` is a *cross-client* protection, and the daemon shares one `Display`
+with its temporary manager. So every launch confirmation deleted the daemon's
+permanent `KP_Enter` grab and the enter Dial died silently until restart.
+
+**The chain is what matters.** The claim was mine. The implementer built on it. A
+reviewer reported independently confirming it — and had, but against `grab.py`'s
+Python rather than against the X server. A test was then written asserting the
+broken behaviour as correct, so the suite actively defended the bug. Three
+independent checks all passed because they all inherited one unverified premise.
+
+Two lessons, both cheap:
+
+- **Context is not free.** Every reviewer given the project's own framing checked
+  the code against that framing. The pass that found this was given only the
+  objective. Uncontexted review is the only kind that can catch a wrong premise,
+  because context *is* the premise.
+- **A claim about an external system needs a probe, not a sentence.** The
+  probes in `docs/probes/` exist precisely because of claims like this — the rule
+  was in force and I exempted my own assertion from it. Anything load-bearing about
+  X now gets a probe that a test references.
+
+The same pass found a second Critical: `geometry()` reads the **client** origin
+while `apply_geometry()`'s `configure()` sets the **frame** position, so a round
+trip moved an SSD window down by its titlebar (`_NET_FRAME_EXTENTS` top = 37 px,
+measured drift = 37 px). It compounded on every `capture`, and it hit Spotify —
+one of the two Dials actually shipped. Read/write asymmetry is invisible to any
+test that only checks one direction; the fix criterion is that the round trip be a
+**fixed point**.
 
 ## On adversarial review
 

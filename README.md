@@ -122,7 +122,7 @@ component in the project that polls.
 
 The full design is `docs/superpowers/specs/2026-07-28-dials-design.md`. Every
 load-bearing X11 claim was verified on this machine before being written down;
-the eight probe scripts are in `docs/probes/` and can be re-run if GNOME,
+the ten probe scripts are in `docs/probes/` and can be re-run if GNOME,
 Firefox, or the monitor layout changes.
 
 ## Human verification required
