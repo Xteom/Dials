@@ -90,8 +90,29 @@ class LaunchCoordinator:
     # ---- confirmation ------------------------------------------------------
 
     def confirm_keycodes(self) -> tuple[int, ...]:
-        """Keys temporarily grabbed while awaiting confirmation."""
+        """Keys that CONFIRM a pending launch when the daemon sees one.
+
+        Wider than `grab_keycodes()` on purpose, and the two must never be
+        conflated again - see the comment there for what happens when they are.
+        """
         return (keys.RETURN_KEYCODE, keys.KP_ENTER_KEYCODE)
+
+    def grab_keycodes(self) -> tuple[int, ...]:
+        """Keys that need a TEMPORARY grab for a confirmation to be receivable.
+
+        `Return` only - deliberately narrower than `confirm_keycodes()`.
+
+        KP_Enter is already grabbed permanently as Dial slot "enter", so the
+        daemon receives it without any extra grab and `is_confirm()` already
+        routes it. Grabbing it again is not merely redundant, it is destructive:
+        X accepts a duplicate passive grab from the SAME client (BadAccess is a
+        cross-client condition only) and does not reference count it, so the
+        keycode lands in the temporary GrabManager's installed set and the next
+        `release_confirm_grabs()` ungrabs it for good - killing the `enter` Dial
+        until the next pause/resume or restart. Measured in
+        docs/probes/09-duplicate-grab-same-client.py.
+        """
+        return (keys.RETURN_KEYCODE,)
 
     def is_confirm(self, keycode: int) -> bool:
         """True if this keypress confirms the pending launch."""
@@ -130,7 +151,7 @@ class LaunchCoordinator:
         self.pending = None
 
     def grabs_needed(self, installed: bool) -> bool:
-        """Whether the temporary Enter grabs should currently be held."""
+        """Whether the temporary `Return` grab should currently be held."""
         p = self.pending
         return p is not None and p.launched_at is None
 

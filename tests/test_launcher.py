@@ -69,6 +69,25 @@ def test_confirm_keycodes_are_return_and_kp_enter():
     assert coord().confirm_keycodes() == (keys.RETURN_KEYCODE, keys.KP_ENTER_KEYCODE)
 
 
+def test_grab_keycodes_are_return_only():
+    """What must be temporarily GRABBED is narrower than what CONFIRMS.
+
+    KP_Enter is permanently grabbed as Dial slot "enter", so the daemon already
+    receives it; grabbing it again in the temporary manager is what let
+    release_confirm_grabs() delete the permanent grab (probe 09).
+    """
+    c = coord()
+    assert c.grab_keycodes() == (keys.RETURN_KEYCODE,)
+    assert keys.KP_ENTER_KEYCODE not in c.grab_keycodes()
+
+
+def test_grab_keycodes_is_a_strict_subset_of_confirm_keycodes():
+    """The two accessors may diverge, but never contradict: anything grabbed
+    for a confirmation had better be able to confirm."""
+    c = coord()
+    assert set(c.grab_keycodes()) < set(c.confirm_keycodes())
+
+
 def test_both_enter_keys_confirm():
     for kc in (keys.RETURN_KEYCODE, keys.KP_ENTER_KEYCODE):
         c = coord()

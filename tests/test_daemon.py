@@ -666,19 +666,34 @@ def test_a_pre_existing_window_is_not_mistaken_for_the_launched_one():
 # ---- the temporary Enter grabs ------------------------------------------
 
 class FakeGrabs:
-    """Stands in for GrabManager. `fail` lists keycodes whose grabs all fail."""
+    """Stands in for GrabManager.
 
-    def __init__(self, fail=(), masks=(0, 2)):
+    `fail` lists keycodes whose grabs fail on every mask; `fail_pairs` lists
+    individual (keycode, mask) pairs that fail.
+
+    Records what it was ASKED to grab and what it later UNGRABBED, because that
+    is exactly what the KP_Enter defect was about: a keycode the temporary
+    manager should never have been handed ended up in its installed set, and
+    `remove_all()` then ungrabbed the daemon's permanent grab on it. The real
+    GrabManager.remove_all() ungrabs precisely its `_installed` pairs, so
+    mirroring that here is what gives these assertions teeth.
+    """
+
+    def __init__(self, fail=(), fail_pairs=(), masks=(0, 2)):
         self.fail = set(fail)
+        self.fail_pairs = set(fail_pairs)
         self.masks = list(masks)
+        self.asked: list[int] = []
         self.installed: list[tuple[int, int]] = []
+        self.ungrabbed: list[tuple[int, int]] = []
         self.removed = 0
 
     def install(self, keycodes):
         failures: dict[int, list[int]] = {}
         for kc in keycodes:
+            self.asked.append(kc)
             for mask in self.masks:
-                if kc in self.fail:
+                if kc in self.fail or (kc, mask) in self.fail_pairs:
                     failures.setdefault(kc, []).append(mask)
                 else:
                     self.installed.append((kc, mask))
@@ -690,11 +705,12 @@ class FakeGrabs:
 
     def remove_all(self):
         self.removed += 1
+        self.ungrabbed.extend(self.installed)
         self.installed.clear()
 
 
 def test_a_failed_return_grab_cancels_the_launch_and_notifies():
-    """Both Enter keys ungrabbable: never leave a confirmation nobody can reach.
+    """`Return` ungrabbable: say so rather than arm a confirmation silently.
 
     This branch decides whether a temporary GLOBAL `Return` grab is abandoned
     or held, which is the most intrusive thing in the design - and it was
@@ -707,7 +723,7 @@ def test_a_failed_return_grab_cancels_the_launch_and_notifies():
     d.handle_slot("9", timestamp=1)
     assert d.launcher.pending is not None
 
-    grabs = FakeGrabs(fail=(keys.RETURN_KEYCODE, keys.KP_ENTER_KEYCODE))
+    grabs = FakeGrabs(fail=(keys.RETURN_KEYCODE,))
     held = _install_confirm_grabs(d.launcher, lambda: grabs, notifier=notes)
 
     assert held is None, "nothing was grabbed, so nothing may be held"
@@ -717,13 +733,15 @@ def test_a_failed_return_grab_cancels_the_launch_and_notifies():
     assert notes.mentions("cancelled")
 
 
-def test_a_failed_kp_enter_grab_still_keeps_the_launch_and_reports_it(caplog):
-    """KP_Enter ALWAYS fails: it is already grabbed as Dial slot "enter".
+def test_only_return_is_temporarily_grabbed_never_kp_enter():
+    """The temporary manager must be handed `Return` and nothing else.
 
-    So the guard must ask "did anything at all get grabbed" rather than count
-    keycodes, or every single confirmation would be spuriously abandoned. The
-    failure is still reported, since otherwise an operator cannot tell why
-    Enter did not work.
+    Replaces a test that asserted the opposite. The old code grabbed
+    confirm_keycodes() - both Enter keys - on the belief that keycode 104 would
+    always fail with BadAccess because the daemon already held it permanently.
+    docs/probes/09-duplicate-grab-same-client.py measures the truth: a duplicate
+    grab from the SAME client succeeds silently (BadAccess is cross-client only),
+    so 104 really did land in the temporary manager.
     """
     from dials.daemon import _install_confirm_grabs
 
@@ -731,15 +749,99 @@ def test_a_failed_kp_enter_grab_still_keeps_the_launch_and_reports_it(caplog):
     d = daemon(FakeOps(windows=[]))
     d.handle_slot("9", timestamp=1)
 
-    grabs = FakeGrabs(fail=(keys.KP_ENTER_KEYCODE,))
+    grabs = FakeGrabs()
+    held = _install_confirm_grabs(d.launcher, lambda: grabs, notifier=notes)
+
+    assert held is grabs
+    assert grabs.asked == [keys.RETURN_KEYCODE]
+    assert keys.KP_ENTER_KEYCODE not in grabs.asked, \
+        "KP_Enter must never be handed to the temporary manager"
+    assert {kc for kc, _ in grabs.installed} == {keys.RETURN_KEYCODE}
+    assert notes == []
+
+
+def test_releasing_the_confirm_grabs_cannot_ungrab_the_enter_dial():
+    """The actual C1 failure: release_confirm_grabs() killed keycode 104.
+
+    Every confirmation resolves - confirmed, timed out or cancelled - and each
+    resolution calls remove_all(). If keycode 104 is in the temporary manager's
+    installed set, that ungrabs the daemon's PERMANENT grab, the `enter` Dial
+    goes dead and KP_Enter falls through to whatever is focused, silently and
+    until the next pause/resume or restart.
+    """
+    from dials.daemon import _install_confirm_grabs
+
+    d = daemon(FakeOps(windows=[]))
+    d.handle_slot("9", timestamp=1)
+
+    grabs = FakeGrabs()
+    held = _install_confirm_grabs(d.launcher, lambda: grabs, notifier=Notes())
+    held.remove_all()                       # what release_confirm_grabs() does
+
+    assert grabs.ungrabbed, "the temporary grab must actually be released"
+    assert all(kc != keys.KP_ENTER_KEYCODE for kc, _ in grabs.ungrabbed), \
+        "the permanent KP_Enter grab was ungrabbed by the confirm-grab cycle"
+
+
+def test_the_temporary_grab_set_never_overlaps_the_permanent_one():
+    """The guard that fires if KP_Enter is ever put back into the grab set.
+
+    Stated as the general invariant rather than as "not 104": ANY permanently
+    grabbed Dial keycode appearing in the temporary set would be ungrabbed out
+    from under the daemon by the next remove_all().
+    """
+    from dials.launcher import LaunchCoordinator
+
+    temporary = set(LaunchCoordinator(notifier=lambda *a, **k: True)
+                    .grab_keycodes())
+    permanent = set(keys.SLOT_KEYCODES.values())
+
+    assert temporary == {keys.RETURN_KEYCODE}
+    assert temporary & permanent == set(), \
+        f"temporarily grabbing {sorted(temporary & permanent)} would delete " \
+        "the daemon's permanent grab on it"
+
+
+def test_kp_enter_still_confirms_although_it_is_never_temporarily_grabbed():
+    """The other half: narrowing the GRAB set must not narrow what CONFIRMS.
+
+    KP_Enter needs no temporary grab precisely because the permanent Dial grab
+    already delivers it - so it must still reach confirm_launch().
+    """
+    spawned = []
+    d = daemon(FakeOps(windows=[]), spawner=spawned.append)
+    d.dispatch_key(keys.keycode_for("9"), timestamp=10)
+
+    assert keys.KP_ENTER_KEYCODE not in d.launcher.grab_keycodes()
+    assert d.launcher.is_confirm(keys.KP_ENTER_KEYCODE) is True
+    assert d.dispatch_key(keys.KP_ENTER_KEYCODE, timestamp=20) == "confirm"
+    assert spawned == ["/snap/bin/spotify"]
+
+
+def test_a_partly_grabbed_return_keeps_the_launch_and_reports_the_gap(caplog):
+    """Return grabbed for mask 0 but not LockMask still confirms with Caps off.
+
+    So the abandon guard must ask "did anything at all get grabbed" rather than
+    "did every mask succeed", or a confirmation Return could still deliver would
+    be spuriously thrown away. The gap is still reported, since otherwise an
+    operator cannot tell why Enter did not work with CapsLock on.
+    """
+    from dials.daemon import _install_confirm_grabs
+
+    notes = Notes()
+    d = daemon(FakeOps(windows=[]))
+    d.handle_slot("9", timestamp=1)
+
+    grabs = FakeGrabs(fail_pairs=((keys.RETURN_KEYCODE, 2),))
     with caplog.at_level("WARNING"):
         held = _install_confirm_grabs(d.launcher, lambda: grabs, notifier=notes)
 
     assert held is grabs
-    assert d.launcher.pending is not None, "Return could still confirm this"
+    assert grabs.installed == [(keys.RETURN_KEYCODE, 0)]
+    assert d.launcher.pending is not None, "Return on mask 0 could still confirm"
     assert notes == [], "nothing to tell the user: Return was grabbed"
-    assert any(str(keys.KP_ENTER_KEYCODE) in r.getMessage()
-               for r in caplog.records), "the failure was not reported"
+    assert any("confirm-grab failures" in r.getMessage() for r in caplog.records), \
+        "the partial failure was not reported"
 
 
 def test_handle_slot_logs_when_it_swallows(caplog):

@@ -457,38 +457,51 @@ def _report_grab_failures(failures: dict[int, list[int]]) -> None:
 
 
 def _install_confirm_grabs(launcher, factory, notifier=None):
-    """Grab the Enter keys while a launch confirmation is pending.
+    """Grab `Return` while a launch confirmation is pending.
 
     Extracted from `main()` so the ABANDON decision is testable without an X
     server: this branch decides whether a temporary GLOBAL `Return` grab is held
     or given up, which is the most intrusive thing in the whole design.
 
-    Returns the GrabManager to hold, or None when nothing could be grabbed - in
-    which case the pending launch is cancelled and the user told, because a
-    confirmation nobody can reach is worse than no confirmation at all.
+    Returns the GrabManager to hold, or None when `Return` could not be grabbed
+    at all - in which case the pending launch is cancelled and the user told,
+    since the ordinary way to reach the confirmation is gone.
     """
     if notifier is None:
         from dials.notify import notify as notifier
     extra = factory()
-    failures = extra.install(launcher.confirm_keycodes())
+    # grab_keycodes(), NOT confirm_keycodes(): the two differ and the difference
+    # is load-bearing. Only `Return` needs a temporary grab. KP_Enter is already
+    # grabbed permanently as Dial slot "enter" and `is_confirm()` routes it, and
+    # re-grabbing it HERE is actively destructive - a same-client duplicate grab
+    # succeeds silently and is not reference counted, so keycode 104 would join
+    # this manager's installed set and `release_confirm_grabs()` would ungrab the
+    # permanent grab, leaving the `enter` Dial dead and KP_Enter falling through
+    # to applications. Measured in
+    # docs/probes/09-duplicate-grab-same-client.py.
+    failures = extra.install(launcher.grab_keycodes())
     if failures:
-        # Keycode 104 (KP_Enter) is EXPECTED to fail on every mask: it is
-        # already grabbed permanently as Dial slot "enter", and X returns
-        # BadAccess for a duplicate grab. Only `Return` (36) can newly succeed.
-        # Reported rather than discarded because the spec requires "keep the
-        # successful grab, report the other" - without this an operator cannot
-        # tell why Enter did not work.
+        # Only `Return` is asked for now, so a failure here is real: another
+        # client holds Return on that modifier combination. Reported rather than
+        # discarded because the spec requires "keep the successful grab, report
+        # the other" - without this an operator cannot tell why Enter did not
+        # work. (The old version logged keycode 104 as an EXPECTED failure here.
+        # That could never fire: the duplicate grab succeeded.)
         log.warning(
-            "confirm-grab failures (keycode %d = KP_Enter is expected here, it "
-            "is already grabbed as Dial 'enter'): %s",
-            keys.KP_ENTER_KEYCODE,
+            "confirm-grab failures: %s",
             {kc: [hex(m) for m in masks] for kc, masks in failures.items()},
         )
     if not extra.active:
-        # The guard asks "did anything at all get grabbed", never "how many
-        # keycodes succeeded": counting keycodes would degenerate into "cancel
-        # iff Return failed on any single mask" and would spuriously abandon a
+        # The guard asks "did anything at all get grabbed", never "on how many
+        # masks": `Return` grabbed for mask 0 but not LockMask still confirms
+        # fine with CapsLock off, so counting masks would spuriously abandon a
         # launch that Return could still confirm.
+        #
+        # Abandoning is conservative rather than strictly forced: KP_Enter stays
+        # permanently grabbed, so the numpad Enter could in principle still reach
+        # this confirmation. Kept as-is deliberately - it is the only path that
+        # tells the user Return was taken by someone else - but it is NOT true
+        # that nobody could reach the confirmation.
         extra.remove_all()
         launcher.cancel()
         notifier("Cannot confirm launch",
@@ -573,7 +586,7 @@ def main() -> int:
     dead_ready = 0                # consecutive ready-but-no-events rounds
 
     def release_confirm_grabs():
-        """Release the temporary Enter grabs ONLY.
+        """Release the temporary `Return` grab ONLY.
 
         Deliberately does not cancel the pending launch: this also runs on the
         normal confirm -> wait-for-window transition, and cancelling there would
@@ -616,7 +629,7 @@ def main() -> int:
                     _report_grab_failures(
                         grabs.install(keys.SLOT_KEYCODES.values()))
 
-            # Hold the temporary Enter grabs only while a confirmation is pending.
+            # Hold the temporary `Return` grab only while a confirmation is pending.
             need = daemon.launcher.grabs_needed(confirm_grabs_held)
             if need and not confirm_grabs_held and not daemon.paused:
                 extra = _install_confirm_grabs(
