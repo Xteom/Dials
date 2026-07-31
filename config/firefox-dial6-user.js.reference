@@ -77,11 +77,14 @@ user_pref("browser.discovery.enabled", false);
 // AT-SPI-based automation against this window.
 user_pref("accessibility.force_disabled", 1);
 
-// ---- Let the side-loaded Dark Mode extension start enabled ----
-// Default 15 disables extensions dropped into the profile directory until they
-// are approved in the UI. Dark Mode was copied in from the main profile on
-// purpose, so it should come up enabled rather than needing a click.
-user_pref("extensions.autoDisableScopes", 0);
+// NOTE: extensions.autoDisableScopes is deliberately NOT set here any more.
+// It was, briefly, to let a Dark Mode xpi copied in from the main profile start
+// enabled. That worked - Firefox registered it as active and signed - but a
+// side-loaded extension gets no toolbar button, so there was nothing visible to
+// click and it looked like it had failed. Extensions are installed by hand from
+// addons.mozilla.org in this profile instead, which also keeps them updating.
+// The pref is back at its default of 15, which is the safer value: it stops
+// anything dropped into the profile directory from silently enabling itself.
 
 
 // ============================ deliberately NOT set ===========================
