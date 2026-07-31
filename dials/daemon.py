@@ -511,11 +511,60 @@ def _install_confirm_grabs(launcher, factory, notifier=None):
     return extra
 
 
+def _drain_events(d, handle) -> tuple[int, bool]:
+    """Hand every QUEUED X event to `handle`. Returns (processed, closed).
+
+    Extracted from `main()` so the starvation this fixes is testable without an X
+    server - the same reasoning that put `dispatch_key` and
+    `_install_confirm_grabs` outside the loop.
+
+    The queue is re-checked before EVERY read rather than snapshotted once. A
+    snapshot starves events that arrive DURING the handlers, and the handlers are
+    full of synchronous round trips (`list_windows()` is ~5 per window):
+    python-xlib queues whatever arrives while it reads those replies, those events
+    were not in the snapshot, and the socket has already been drained - so
+    select() does not report the fd readable again, and at idle select() blocks
+    with a None timeout by design. A focus-change PropertyNotify swallowed
+    mid-handler could therefore wait indefinitely, and an on_focus_loss="hide"
+    panel would not hide until some unrelated event happened to arrive.
+
+    This is NOT the previously-rejected `range(max(1, pending_events))`. That
+    version called `next_event()` on an EMPTY queue, which blocks indefinitely
+    (measured), freezing every Dial and every timeout. Here `next_event()` is
+    reached only when `pending_events()` has already reported a non-empty queue,
+    so it cannot block. `pending_events()` cannot block either: it is not a
+    passive queue-length read but `send_and_recv(recv=True)`, whose select() uses
+    `timeout=0` (python-xlib protocol/display.py), so it consumes whatever is
+    readable and returns the resulting EVENT count. A 0 means the readable bytes
+    were a reply or an error rather than an event; they have been consumed, so
+    returning to select() is correct.
+
+    The return value feeds `main()`'s dead-connection guard, which is why the
+    count is of events actually processed: a wakeup that yields none is exactly
+    the condition that guard watches for.
+    """
+    from Xlib.error import ConnectionClosedError
+
+    drained = 0
+    while True:
+        try:
+            if not d.pending_events():
+                return drained, False
+            event = d.next_event()
+        except ConnectionClosedError:
+            return drained, True
+        except Exception:
+            log.warning("X event read failed; returning to select()",
+                        exc_info=True)
+            return drained, False
+        drained += 1
+        handle(event)
+
+
 def main() -> int:
     import socket
 
     from Xlib import X, display
-    from Xlib.error import ConnectionClosedError
 
     # Without this only logging.lastResort carries records, so every daemon
     # diagnostic reached journald with no level and no logger name. journald
@@ -600,6 +649,24 @@ def main() -> int:
             confirm_grabs.remove_all()
         confirm_grabs_held = False
 
+    def handle_event(event):
+        """Route one X event. Every branch already swallows its own failures."""
+        if mons.handles(event):
+            mons.invalidate()
+            return
+
+        if event.type == X.PropertyNotify:
+            if event.atom == active_atom:
+                daemon.on_active_window_changed()
+            elif event.atom == client_list_atom:
+                daemon.on_client_list_changed()
+            return
+
+        if event.type != X.KeyPress:
+            return
+
+        daemon.dispatch_key(event.detail, timestamp=event.time)
+
     try:
         while True:
             # Checked before anything else so an orderly stop never dispatches
@@ -663,33 +730,21 @@ def main() -> int:
                 # Skipping the X read also keeps `dead_ready` honest.
                 continue
 
-            # DO NOT "fix" this to range(max(1, pending_events)).
-            # pending_events() is not a passive queue-length read: python-xlib's
-            # protocol/display.py calls send_and_recv(recv=1) first, so it drains the
-            # socket and then reports how many EVENTS resulted. Verified on this
-            # machine: with select() reporting readable it returned 1, and an idle
-            # connection fired select() 0/3 times - so there is no spin.
-            # A 0 here means the readable bytes were a reply or an error rather than
-            # an event; they have already been consumed, so returning to select() is
-            # correct. Forcing next_event() when the queue is empty would BLOCK
-            # indefinitely (measured), freezing every Dial and every timeout until
-            # some unrelated event arrived.
-            try:
-                pending_events = d.pending_events()
-            except ConnectionClosedError:
+            drained, closed = _drain_events(d, handle_event)
+            if closed:
                 print("dialsd: X connection closed; exiting for restart",
                       file=sys.stderr)
                 return 1
-            except Exception:
-                pending_events = 0
 
             # A peer-closed X socket is permanently readable while yielding no
             # events, which would spin at 100% CPU forever. python-xlib does
             # raise ConnectionClosedError on EOF, but this bounded guard also
             # covers any readable-yet-eventless state it does not: exit so
             # systemd (Restart=on-failure, PartOf=graphical-session.target) can
-            # restart us with the next session.
-            if pending_events == 0:
+            # restart us with the next session. Counted AFTER the drain now, but
+            # on the same condition as before: a wakeup that yielded no event at
+            # all still counts, and any event at all still clears the count.
+            if drained == 0:
                 dead_ready += 1
                 if dead_ready > MAX_DEAD_READY:
                     print("dialsd: X fd readable with no events; assuming the "
@@ -698,32 +753,6 @@ def main() -> int:
                     return 1
             else:
                 dead_ready = 0
-
-            for _ in range(pending_events):
-                try:
-                    event = d.next_event()
-                except ConnectionClosedError:
-                    print("dialsd: X connection closed; exiting for restart",
-                          file=sys.stderr)
-                    return 1
-                except Exception:
-                    break
-
-                if mons.handles(event):
-                    mons.invalidate()
-                    continue
-
-                if event.type == X.PropertyNotify:
-                    if event.atom == active_atom:
-                        daemon.on_active_window_changed()
-                    elif event.atom == client_list_atom:
-                        daemon.on_client_list_changed()
-                    continue
-
-                if event.type != X.KeyPress:
-                    continue
-
-                daemon.dispatch_key(event.detail, timestamp=event.time)
     finally:
         # Orderly stop. Grabs being process-scoped only covers a CRASH; an
         # orderly stop must not rely on that, and leaving `Return` grabbed

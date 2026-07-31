@@ -857,6 +857,151 @@ def test_handle_slot_logs_when_it_swallows(caplog):
     assert any("handle_slot failed" in r.getMessage() for r in caplog.records)
 
 
+# ---- the event drain ----------------------------------------------------
+
+class FakeXQueue:
+    """A python-xlib Display stand-in for `_drain_events`.
+
+    `pending_events()` reports the queue length; the real one drains the socket
+    first and then reports the resulting EVENT count, which is exactly why
+    re-asking on every iteration is safe rather than wasteful.
+
+    `next_event()` on an EMPTY queue raises loudly instead of returning something
+    plausible, because the real one BLOCKS INDEFINITELY there - that is what made
+    the earlier `range(max(1, pending_events))` idea unusable, and a fake that
+    quietly returned None would hide a reintroduction of it.
+    """
+
+    def __init__(self, events=()):
+        self.queue = list(events)
+        self.polls = 0
+        self.reads = 0
+
+    def pending_events(self):
+        self.polls += 1
+        return len(self.queue)
+
+    def next_event(self):
+        self.reads += 1
+        if not self.queue:
+            raise AssertionError(
+                "next_event() on an empty queue: the real one blocks forever")
+        return self.queue.pop(0)
+
+
+def test_the_drain_processes_events_that_arrive_during_a_handler():
+    """The starvation this replaced a snapshot count to fix.
+
+    Handlers make dozens of synchronous round trips (list_windows() is ~5 per
+    window) and python-xlib queues whatever events arrive while it reads those
+    replies. With a snapshot count those events are not processed, the socket is
+    already drained so select() does not fire again, and at idle select() blocks
+    with a None timeout - so an on_focus_loss="hide" panel stays up indefinitely.
+    """
+    from dials.daemon import _drain_events
+
+    q = FakeXQueue(["focus-change"])
+    seen = []
+
+    def handle(event):
+        seen.append(event)
+        if event == "focus-change":
+            # What the handler's own round trips do: queue more events.
+            q.queue.append("client-list-change")
+
+    drained, closed = _drain_events(q, handle)
+
+    assert seen == ["focus-change", "client-list-change"], \
+        "an event queued during a handler was starved"
+    assert (drained, closed) == (2, False)
+
+
+def test_the_drain_never_reads_from_an_empty_queue():
+    """next_event() on an empty queue blocks forever; the loop must not go there.
+
+    This is what separates draining-while-non-empty from the rejected
+    range(max(1, pending_events)) change.
+    """
+    from dials.daemon import _drain_events
+
+    q = FakeXQueue([])
+    drained, closed = _drain_events(q, lambda event: pytest.fail(
+        "there was nothing to handle"))
+
+    assert (drained, closed) == (0, False)
+    assert q.reads == 0, "next_event() was called with an empty queue"
+
+
+def test_the_drain_re_asks_the_queue_rather_than_trusting_one_count():
+    """One poll per read, plus the final poll that finds the queue empty."""
+    from dials.daemon import _drain_events
+
+    q = FakeXQueue(["a", "b", "c"])
+    _drain_events(q, lambda event: None)
+    assert q.polls == 4
+    assert q.reads == 3
+
+
+def test_the_drain_count_is_what_keeps_the_dead_connection_guard_honest():
+    """main() presumes the connection dead after MAX_DEAD_READY eventless
+    wakeups, and now counts what the drain returns. So an eventless wakeup must
+    still report 0 - otherwise a peer-closed socket spins at 100% CPU forever -
+    and any event at all must report non-zero, or a busy session would eventually
+    exit for no reason."""
+    from dials.daemon import _drain_events
+
+    assert _drain_events(FakeXQueue([]), lambda event: None) == (0, False)
+    assert _drain_events(FakeXQueue(["a", "b"]), lambda event: None) == (2, False)
+
+
+def test_a_closed_connection_is_reported_rather_than_raised():
+    """main() turns the flag into `exit 1` so systemd restarts with the session."""
+    from Xlib.error import ConnectionClosedError
+
+    from dials.daemon import _drain_events
+
+    class Closed:
+        def pending_events(self):
+            raise ConnectionClosedError("server")
+
+        def next_event(self):
+            raise AssertionError("must not be reached")
+
+    assert _drain_events(Closed(), lambda event: None) == (0, True)
+
+
+def test_a_connection_closed_mid_drain_keeps_the_events_already_processed():
+    from Xlib.error import ConnectionClosedError
+
+    from dials.daemon import _drain_events
+
+    class ClosesAfterOne(FakeXQueue):
+        def next_event(self):
+            if self.reads == 1:
+                raise ConnectionClosedError("server")
+            return super().next_event()
+
+    seen = []
+    assert _drain_events(ClosesAfterOne(["a", "b"]), seen.append) == (1, True)
+    assert seen == ["a"]
+
+
+def test_an_ordinary_read_failure_returns_to_select_and_is_logged(caplog):
+    """A non-fatal read error must not spin: return and let select() decide."""
+    from dials.daemon import _drain_events
+
+    class Flaky:
+        def pending_events(self):
+            return 1
+
+        def next_event(self):
+            raise RuntimeError("x server hiccup")
+
+    with caplog.at_level("WARNING"):
+        assert _drain_events(Flaky(), lambda event: None) == (0, False)
+    assert any("event read failed" in r.getMessage() for r in caplog.records)
+
+
 # ---- tick ---------------------------------------------------------------
 
 def test_tick_expires_an_armed_confirmation():
