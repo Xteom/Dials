@@ -85,7 +85,7 @@ be re-run if GNOME, Firefox, or the monitor layout changes.
 | Anything on this system reserves screen space | No managed window sets `_NET_WM_STRUT`/`_STRUT_PARTIAL`, and `_NET_WORKAREA` equals the full root box with zero insets. Shell chrome (top bar) is not a managed window and is not covered by this | `05` |
 | NumLock state readable | Yes — `get_keyboard_control().led_mask & 0x2`, agrees with `xset` | `05` |
 | python-xlib exposes XKB (for event-driven NumLock) | **No** — server has `XKEYBOARD`, the binding does not | `05` |
-| Monitors enumerable in pure python-xlib | Yes, via the RandR **1.2** path; `get_monitors` (1.5) is absent from the binding | `06` |
+| Monitors enumerable in pure python-xlib | Yes, via the RandR **1.2** path. `get_monitors` (1.5) is absent from python-xlib **0.29** (the system copy the probe ran against) and present in **0.33** (what the venv installs); since the project floor is `>=0.29`, 1.2 is the portable choice and is used deliberately | `06` |
 | Monitor hotplug **subscription** accepted | Yes — `randr.select_input(RRScreenChangeNotifyMask …)` succeeds. This proves the mask registers, **not** that events are received and decoded; a live hotplug test is an implementation task | `06` |
 | Cost of one NumLock read | 28.4 µs; a 1 Hz poll is 0.0028 % of one core | `06` |
 
@@ -353,8 +353,10 @@ Layout as of probe `06`:
 ### Enumeration
 
 Pure python-xlib, RandR **1.2** API — `get_screen_resources` → `get_output_info` → `get_crtc_info`,
-plus `get_output_primary`. The 1.5 `get_monitors` call is *not* available in python-xlib 0.29 (probe
-`06`), so it is not used. Outputs with `crtc == 0` are skipped as disconnected.
+plus `get_output_primary`. The 1.5 `get_monitors` call is absent from python-xlib **0.29** (probe
+`06`) and present in **0.33** (what the venv installs); because the dependency floor is `>=0.29`,
+1.2 is the portable choice and is used deliberately rather than for lack of an alternative. Outputs
+with `crtc == 0` are skipped as disconnected.
 
 **RandR 1.2 enumerates outputs, not logical monitors**, which matters: mirrored outputs share one
 CRTC and would otherwise appear as two "monitors" with identical rects. Results are therefore
@@ -728,11 +730,21 @@ An unbound-but-configured app is not launched on the first press, so a stray key
 anything. Instead: notify *"Spotify not running — press Enter to launch"* and arm for 5 s. Either
 main `Return` (keycode 36) or `KP_Enter` confirms.
 
-While armed, `Return` and `KP_Enter` are grabbed over the **same tolerated lock-mask set as the Dial
-keys** — `{0, LockMask}` — and ungrabbed immediately on the first press or at timeout. Using mask 0
-alone here would reintroduce the probe `07` bug in miniature: confirmation would silently stop working
-whenever CapsLock happened to be on. Modified Enter is still never touched, since `Mod2Mask`,
+While armed, **only `Return`** is temporarily grabbed, over the **same tolerated lock-mask set as the
+Dial keys** — `{0, LockMask}` — and ungrabbed immediately on the first press or at timeout. Using mask
+0 alone here would reintroduce the probe `07` bug in miniature: confirmation would silently stop
+working whenever CapsLock happened to be on. Modified Enter is still never touched, since `Mod2Mask`,
 `ControlMask` and `ShiftMask` are excluded, so `Shift+Enter` and `Ctrl+Enter` pass through untouched.
+
+`KP_Enter` is deliberately **not** grabbed here. It is already permanently grabbed as Dial slot
+`enter`, so the daemon receives it regardless and the dispatcher routes it. An earlier draft of this
+section grabbed both, on the false premise that X returns `BadAccess` for a duplicate grab and that the
+temporary grab would therefore be a harmless no-op. Probe `09` measured the opposite: a duplicate
+passive grab from the **same client** succeeds silently and is not reference counted, so `KP_Enter`
+entered the temporary grab set and the first release deleted the *permanent* grab — killing the `enter`
+Dial until the next pause/resume or restart. `BadAccess` is a cross-client condition only. "What
+confirms a launch" and "what needs a temporary grab" are therefore separate sets in the code
+(`confirm_keycodes()` vs `grab_keycodes()`) and must stay separate.
 
 `Return` must be `BadAccess`-checked at grab time like every other key, since it is far more likely to
 be contended than the numpad keys. See *Confirmation edge cases* below for what happens when one or
@@ -759,8 +771,8 @@ These were undefined in an earlier draft and are now specified, because a tempor
 
 | Case | Behavior |
 | --- | --- |
-| Either `Return` or `KP_Enter` grab fails | arm with whichever succeeded; if **both** fail, refuse to arm and notify — never leave a confirmation pending with no way to confirm it |
-| One grab succeeds, the other fails | roll back to a consistent state: keep the successful grab, report the other in `status` |
+| The `Return` grab fails on every mask | refuse to arm and notify — never leave a confirmation pending with no way to confirm it. Conservative rather than exact: `KP_Enter` is permanently grabbed, so such a launch *could* still have been confirmed from the numpad. Preferred over the alternative, which is arming while telling the user "press Enter" when the key they are most likely to reach for is contended |
+| The `Return` grab fails on some masks but not others | arm anyway; confirmation works in the lock states that succeeded, and the failure is reported |
 | A second missing-app Dial is pressed while armed | the newer request **replaces** the older one; there is only ever one pending confirmation, so Enter is never ambiguous |
 | The originating Dial key is pressed again while armed | treated as confirmation, so the "press it twice" instinct also works |
 | Daemon exits, is paused, or reloads while armed | both temporary grabs are released in a `finally`-equivalent path; grabs are process-scoped so a *crash* releases them with the X connection, but an orderly stop must not rely on that |
@@ -782,17 +794,22 @@ can be revisited after living with it.
 
 ```
 dials list                 # table of all 15 slots, bound or not
-dials bind <slot>          # bind interactively (opens the window picker)
 dials unbind <slot>
 dials capture <slot>       # save the matched window's current geometry into its Dial
 dials reload               # SIGHUP the daemon
 dials pause                # release all grabs; numpad behaves stock in both NumLock states
 dials resume               # re-install grabs
-dials status               # daemon state, grab conflicts, monitor fallbacks, geometry mismatches
+dials status               # paused or active, how many Dials are bound, config health
 dials config               # print the live path and the reference path; flag if the snapshot differs
 dials config export        # overwrite the repo reference copy from the live config
 dials                      # no args -> curses TUI
 ```
+
+Interactive binding is the **TUI's `b` key** (window picker), plus assign mode's `.` hotkey — there is
+no `dials bind <slot>` subcommand, and an earlier draft of this block wrongly listed one.
+`dials status` reports only what a short-lived CLI process can see for itself; the grab-conflict,
+monitor-fallback and geometry-mismatch reporting promised elsewhere in this document is **not built**
+— see *Deferred*.
 
 `pause` exists because these grabs are global: if a game or a remote-desktop session needs the raw
 numpad keys, there has to be a way to stand down without stopping the service. It is a flag file in
@@ -843,15 +860,34 @@ keeps the always-on process purely event-driven per the AGENTS.md daemon rules.
 
 ## Resource budget
 
-Lightweight is a hard requirement, not an aspiration, so it gets stated as numbers the build must hit
-and design rules that produce them. The reference point is the sibling `clip` daemon: same stack
-(python-xlib on Python 3.10, event-driven, no GTK), measured at ~14 MB idle.
+Lightweight is a hard requirement, not an aspiration, so it gets stated as numbers plus the design
+rules that produce them. The reference point is the sibling `clip` daemon: same stack (python-xlib on
+Python 3.10, event-driven, no GTK), measured at ~14 MB idle.
 
-| Process | Idle CPU | Idle RSS | Wakeups at idle |
-| --- | --- | --- | --- |
-| `dialsd` (always on) | **0.0 %** | **≤ 16 MB** | **0 / s** |
-| `dials-tray` (opt-in) | ≤ 0.01 % | ≤ 45 MB (GTK) | 1 / s |
-| `dials`, `dials-confirm` | transient — contribute nothing at idle | | |
+The table below is **as measured**, not as estimated: the original figures here were arithmetic on the
+cheap half of a tray tick and an RSS guess, and two of the three tray numbers did not survive contact
+with a real measurement. **PSS is the primary metric** for both processes — most of either RSS figure
+is shared library pages (the CPython/libc baseline every Python process pays, and GTK libraries other
+GTK apps on this desktop already keep resident), so RSS overstates what Dials itself costs.
+
+| Process | Idle CPU | Idle PSS | Idle RSS | Wakeups at idle |
+| --- | --- | --- | --- | --- |
+| `dialsd` (always on) | **0.000 %** | **10.6 MB** | 16.9 MB | **0.0 / s** |
+| `dials-tray` (opt-in) | 0.055 % | 24.8 MB | 62.7 MB | ~2 / s |
+| `dials`, `dials-confirm` | transient — contribute nothing at idle | | | |
+
+Measured from `.venv/bin/dialsd` against scratch `XDG_CONFIG_HOME`/`XDG_STATE_HOME` seeded with the
+two reference Dials, idle for 65 s with no keypresses and no NumLock toggle (Task 22).
+
+`dialsd`'s **0.0 wakeups/s is an exact zero delta** in voluntary context switches over that window —
+the concrete proof that `select()` really does block with a `None` timeout and the process is not
+scheduled at all when nothing is armed. That is the number this whole design exists to protect.
+
+`dials-tray`'s residual 0.055 % CPU is **`Gtk.StatusIcon`'s own mainloop**, X11 and tray-protocol
+overhead — not the polling logic: one tick of the actual `led_mask` read costs ~29 µs, about five
+orders of magnitude below the 1 s interval. No implementation of a GTK status icon reaches the
+0.01 % this section originally claimed, so that figure was unachievable rather than merely missed.
+The tray remains opt-in precisely because it is the only component that polls at all.
 
 ### How the daemon reaches zero
 
@@ -889,8 +925,10 @@ trade was made deliberately:
   than folded in. Running without it costs nothing; `dials status` gives the same information from the
   CLI.
 
-Verification is not optional: the numbers above get measured with the daemon idle for several minutes
-and written into the README, and a build that misses them is not finished.
+Verification is not optional: the numbers above were measured with the daemon idle rather than
+estimated, and are recorded in the README as well. The one line that matters most — `dialsd` doing
+literally nothing at idle — holds exactly. The two tray lines that did not hold were mis-specified
+budgets, not regressions to chase, and are restated above as the measured floor.
 
 ## Error handling
 
@@ -970,6 +1008,19 @@ directory.
 
 ## Deferred
 
+- **Runtime diagnostics in `dials status`** — grab conflicts, monitor fallbacks and geometry
+  mismatches. This document promises them in four places (*Resolution fallback chain*,
+  *Geometry limits*, the *Confirmation edge cases* table, and the *Error handling* table) and the
+  shipped `dials status` reports none of them. It reports what one short-lived process can see for
+  itself: paused/active, how many Dials are bound, and whether the config parses. Everything else
+  lives in the **daemon's** memory, and `status` is a separate process with no channel to it, so this
+  is a missing feature rather than a missing print statement: it needs a daemon→CLI channel — a JSON
+  state file written to `state_dir()` on each event, or D-Bus. What exists instead, per diagnostic:
+  grab failures are printed to stderr at startup and on resume, so `journalctl --user -u dialsd` has
+  them; a monitor fallback raises a desktop notification once per Dial (and `monitors.pick` already
+  returns the reason string this feature would consume); **geometry mismatch is not detected at all**
+  — nothing reads the granted geometry back, so the "log the discrepancy once" line in
+  *Geometry limits* is unimplemented too.
 - **Crosshair click-to-pick** binding (`xdotool selectwindow`) — the assign-mode hotkey and the TUI
   window picker cover the need; this is a small addition if it turns out to be wanted.
 - **Real bitmap app icons** in the TUI via the Kitty graphics protocol.

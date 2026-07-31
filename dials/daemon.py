@@ -1,0 +1,796 @@
+"""The Dials daemon: one X connection, one select() loop, zero polling.
+
+Resource budget lives or dies here. The loop blocks in select() on the X file
+descriptor with a timeout of None whenever nothing is armed, so at idle the
+process is not scheduled at all - that is what produces 0.0% CPU and 0
+wakeups/s. Every timeout in the design (assign 5s, confirm 5s, launch wait 10s,
+activation 1.5s) is folded into that select() timeout via `select_timeout()`;
+there is no periodic tick and no sleep loop anywhere.
+
+Because the idle timeout is None, signals need a wakeup fd to be noticed at all:
+under PEP 475 select() is auto-retried after a handler returns, so
+InterruptedError never fires and a SIGHUP would otherwise sit unobserved until
+some unrelated X event arrived. See `main()`.
+
+Deliberately does NOT import: curses, gi/GTK, dials.configwrite, dials.tui.
+"""
+from __future__ import annotations
+
+import logging
+import os
+import select
+import signal
+import sys
+import time as _time
+
+from dials import geometry, keys, monitors as monitors_mod, panels
+from dials.assign import AssignMode, Capture, OverwriteRequest, derive_rect
+from dials.config import Config, config_path, load, state_dir
+from dials.grab import Debouncer, GrabManager
+from dials.launcher import LaunchCoordinator
+from dials.panels import FocusTracker
+from dials.windows import WindowOps, choose, group_ids
+
+log = logging.getLogger(__name__)
+
+PAUSE_FLAG = "paused"
+
+#: Consecutive "X fd readable but zero events" rounds tolerated before the
+#: connection is presumed dead. A peer-closed socket is permanently readable
+#: while yielding nothing, which would otherwise spin at 100% CPU forever.
+MAX_DEAD_READY = 200
+
+
+class Daemon:
+    """Wiring plus dispatch. X access is injected so this is unit-testable."""
+
+    def __init__(self, config: Config, ops, monitors, clock=_time.monotonic,
+                 notifier=None, spawner=None, confirm_runner=None):
+        self.config = config
+        self.ops = ops
+        self.monitors = monitors
+        self._clock = clock
+        if notifier is None:
+            from dials.notify import notify as notifier
+        self._notify = notifier
+        self._confirm_runner = confirm_runner or _spawn_confirm_dialog
+
+        from dials.launcher import _spawn as default_spawn
+        self.launcher = LaunchCoordinator(
+            clock=clock, spawner=spawner or default_spawn, notifier=notifier
+        )
+        self.assign = AssignMode(clock=clock, notifier=notifier,
+                                 defaults=config.defaults)
+        self.debouncer = Debouncer(clock=clock)
+        self.trackers: dict[str, FocusTracker] = {}
+        self.recent: tuple[int, ...] = ()
+        self.monitor_warnings: dict[str, str] = {}
+        self._paused = False
+        # KeyPress.time of the Enter that confirmed the pending launch. EWMH
+        # wants a real user-activity timestamp for the post-launch activation,
+        # and CurrentTime (0) is explicitly ruled out by the spec.
+        self._confirm_timestamp = 0
+
+    # ---- pause -----------------------------------------------------------
+
+    @property
+    def paused(self) -> bool:
+        return self._paused
+
+    def pause(self) -> None:
+        self._paused = True
+
+    def resume(self) -> None:
+        self._paused = False
+
+    # ---- config ----------------------------------------------------------
+
+    def reload(self, config: Config) -> None:
+        """Adopt new config and abandon every in-flight transition.
+
+        An activation in flight for a Dial that may have changed must not be
+        applied to the new definition.
+        """
+        self.config = config
+        for tracker in self.trackers.values():
+            tracker.forget()
+        self.trackers.clear()
+        # Replacing the instance is what drops any armed capture - a fresh
+        # AssignMode is unarmed by construction, so an explicit cancel() here
+        # would be dead code. Rebuilding rather than reusing is required for a
+        # second reason: AssignMode snapshots `defaults` at construction, so
+        # keeping the old instance would bind post-reload Dials with the
+        # PRE-reload on_focus_loss / pin_geometry.
+        self.assign = AssignMode(clock=self._clock, notifier=self._notify,
+                                 defaults=config.defaults)
+        self.launcher.cancel()
+
+    def reload_from(self, loader=load) -> bool:
+        """Re-read config, keeping the last-good one if the new file is broken.
+
+        Lives here rather than inline in `main()` so the failure path is
+        testable without an X server - the same reasoning that put
+        `dispatch_key` on this class. Returns True when a new config was
+        adopted.
+        """
+        try:
+            new_config = loader()
+        except Exception as exc:
+            # Spec: keep the last-good config and say so. A hand-edited config
+            # must never kill the daemon, and must never trip systemd's start
+            # limit into a permanently failed unit (the startup load() stays
+            # fatal - there is no last-good config to keep at that point).
+            self._notify("Dials config not reloaded",
+                         f"keeping the previous config: {exc}")
+            log.warning("config reload failed, keeping last good: %s", exc)
+            return False
+        self.reload(new_config)
+        return True
+
+    def _tracker(self, dial) -> FocusTracker:
+        t = self.trackers.get(dial.slot)
+        if t is None or t.on_focus_loss != dial.on_focus_loss:
+            t = FocusTracker(dial.on_focus_loss, clock=self._clock)
+            self.trackers[dial.slot] = t
+        return t
+
+    # ---- geometry --------------------------------------------------------
+
+    def _rect_for(self, dial) -> geometry.Rect:
+        mons = self.monitors.monitors()
+        root = self.monitors.root_rect()
+        monitor, warning = monitors_mod.pick(dial.monitor, mons, root)
+        if warning and self.monitor_warnings.get(dial.slot) != warning:
+            self.monitor_warnings[dial.slot] = warning
+            self._notify(f"Dial {dial.slot}", warning)
+        return geometry.resolve(dial.rect, monitor.rect, root)
+
+    # ---- dispatch --------------------------------------------------------
+
+    def handle_slot(self, slot: str, timestamp: int) -> str | None:
+        """Run one Dial keypress. Returns the action decided, or None."""
+        if self._paused:
+            return None
+
+        dial = self.config.dial(slot)
+        if dial is None:
+            return None
+
+        try:
+            windows = self.ops.list_windows()
+            if windows is None:
+                # UNKNOWN, not "no windows". Skipping the press loses one
+                # keypress; treating unknown as empty makes a running app look
+                # unlaunched, takes the LAUNCH branch, and a confirm then starts a
+                # SECOND instance of it. One dropped press is the cheaper failure
+                # by a wide margin, and it is logged so it is not a mystery.
+                log.warning("window list unreadable; ignoring the press on "
+                            "slot %r", slot)
+                return None
+            active = self.ops.active_window()
+            chosen = choose(windows, dial.match_class,
+                            active_id=active, recent=self.recent)
+            found = chosen is not None
+            hidden = bool(found and self.ops.is_hidden(chosen.wid))
+            is_active = bool(found and active == chosen.wid)
+
+            action = panels.decide(found, hidden, is_active)
+
+            if action == panels.LAUNCH:
+                # arm() refuses and notifies honestly when dial.launch is empty,
+                # so no global `Return` grab is taken for a Dial that could not
+                # launch anything. The tag is the action DECIDED; whether a
+                # confirmation is now pending is launcher.pending's business.
+                self.launcher.arm(dial)
+                return action
+
+            if action == panels.HIDE:
+                self._tracker(dial).forget()
+                self.ops.iconify(chosen.wid)
+                return action
+
+            if panels.reapply_geometry(action, dial.pin_geometry):
+                self.ops.apply_geometry(chosen.wid, self._rect_for(dial))
+            if action == panels.SHOW:
+                self.ops.apply_hints(chosen.wid,
+                                     above=(dial.on_focus_loss == "above"))
+            self._tracker(dial).activating(chosen.wid)
+            self.ops.activate(chosen.wid, timestamp)
+            return action
+        except Exception:
+            # Degrade never crash: a dead window or an X hiccup must not take
+            # the daemon down mid-keypress. This is the most-executed swallow in
+            # the project, so it logs: the spec's rule is "logged and
+            # swallowed", and a Dial that silently does nothing on every press
+            # is otherwise undiagnosable.
+            log.exception("handle_slot failed for slot %r", slot)
+            return None
+
+    def dispatch_key(self, keycode: int, timestamp: int) -> str | None:
+        """Route one grabbed KeyPress. Returns a tag for what was done.
+
+        Lives here rather than inline in `main()` so the ORDERING is testable
+        without an X server. The order is load-bearing:
+
+        * the Debouncer runs first, so holding a Dial key cannot toggle it
+          repeatedly (server autorepeat is indistinguishable from real presses);
+        * `is_confirm` runs BEFORE `slot_for`, so while a confirmation is armed
+          the Enter keys confirm the launch instead of firing their own Dial.
+          KP_Enter is both a confirm key and slot "enter", so getting this
+          backwards would silently make Enter un-confirmable.
+
+        Returns None when the press was ignored, "confirm" / "assign" / "bind"
+        for the non-Dial paths, else the action from `handle_slot`.
+        """
+        try:
+            if not self.debouncer.allow(keycode):
+                return None                   # autorepeat
+
+            if self.launcher.is_confirm(keycode):
+                self.confirm_launch(timestamp)
+                return "confirm"
+
+            slot = keys.slot_for(keycode)
+            if slot is None:
+                return None
+            if slot == keys.ASSIGN_SLOT:
+                self.arm_assign()
+                return "assign"
+            if self.assign.armed:
+                self.handle_assign_key(slot)
+                return "bind"
+            return self.handle_slot(slot, timestamp=timestamp)
+        except Exception:
+            # Degrade never crash: no keypress may take the daemon down. This
+            # is the outer net for the paths handle_slot does not already wrap
+            # (notably _persist's lazy import of the TOML writer).
+            log.warning("dispatch failed for keycode %r", keycode, exc_info=True)
+            return None
+
+    def confirm_launch(self, timestamp: int) -> bool:
+        """Confirm the pending launch, remembering the triggering timestamp.
+
+        The timestamp is kept so the post-launch activation can pass a real
+        user-activity time rather than CurrentTime. It may be up to
+        LAUNCH_WAIT_TIMEOUT stale by the time the window appears, which is
+        still strictly better than 0 under focus-stealing prevention.
+        """
+        self._confirm_timestamp = timestamp
+        return self.launcher.confirm()
+
+    def handle_assign_key(self, slot: str) -> None:
+        """A numpad key pressed while assign mode is armed."""
+        try:
+            existing = self.config.dial(slot) if keys.is_bindable(slot) else None
+            result = self.assign.resolve(slot, existing)
+        except Exception as exc:
+            self._notify("Assign failed", str(exc))
+            return
+        if isinstance(result, OverwriteRequest):
+            self._confirm_runner(result)
+        else:
+            self._persist(result)
+
+    def arm_assign(self) -> None:
+        """'.' pressed: snapshot the focused window, or cancel if already armed."""
+        if self.assign.armed:
+            self.assign.cancel()
+            self._notify("Assign mode cancelled")
+            return
+        try:
+            active = self.ops.active_window()
+            if not active:
+                self._notify("Assign mode", "no active window to bind")
+                return
+            listed = self.ops.list_windows()
+            if listed is None:
+                # Unknown, not empty: guessing empty would report the window as
+                # "not manageable", which is a different and wrong diagnosis.
+                self._notify("Assign mode", "could not read the window list")
+                return
+            windows = {w.wid: w for w in listed}
+            info = windows.get(active)
+            if info is None:
+                self._notify("Assign mode", "active window is not manageable")
+                return
+            win_rect = self.ops.geometry(active) or geometry.Rect(0, 0, 800, 600)
+            mons = self.monitors.monitors()
+            root = self.monitors.root_rect()
+            monitor = _monitor_containing(win_rect, mons, root)
+            self.assign.arm(Capture(
+                wid=active,
+                wm_class=info.wm_class,
+                label=self.ops.window_name(active),
+                monitor=monitor.name,
+                rect=derive_rect(win_rect, monitor),
+                at=self._clock(),
+            ))
+        except Exception as exc:
+            self._notify("Assign mode failed", str(exc))
+
+    def _persist(self, dial) -> None:
+        """Write a Dial. Imports the writer lazily so the daemon stays lean.
+
+        The import sits INSIDE the try: it is the one import in a keypress path,
+        so a missing/broken tomli_w must degrade to a notification rather than
+        propagate out of the event loop and kill the daemon.
+        """
+        try:
+            from dials.configwrite import upsert_dial
+            self.config = upsert_dial(config_path(), dial)
+            self._notify("Dial bound", f"{dial.slot} -> {dial.label}")
+        except Exception as exc:
+            self._notify("Could not save Dial", str(exc))
+
+    # ---- focus watching --------------------------------------------------
+
+    def on_active_window_changed(self) -> None:
+        """Reconcile every tracker against the CURRENT active window.
+
+        Reads the property fresh rather than trusting an event payload, so a
+        stale or coalesced PropertyNotify cannot drive a wrong transition.
+        """
+        try:
+            active = self.ops.active_window()
+            windows = self.ops.list_windows()
+        except Exception:
+            return
+
+        if windows is None:
+            # Unknown, not empty. Reconciling against a guessed-empty list would
+            # make every tracked window look gone, and adopting a pending launch
+            # from it is meaningless. Deliberately a COMPLETE no-op, `recent`
+            # included: one skipped MRU update costs nothing, whereas half-acting
+            # on an unknown state is how the LAUNCH-a-running-app bug happened.
+            log.debug("window list unreadable on focus change; skipping")
+            return
+
+        if active:
+            self.recent = (active,) + tuple(w for w in self.recent if w != active)[:7]
+
+        by_id = {w.wid: w for w in windows}
+        for slot, tracker in list(self.trackers.items()):
+            dial = self.config.dial(slot)
+            if dial is None or tracker.window is None:
+                continue
+            info = by_id.get(tracker.window)
+            group = group_ids(info, windows) if info else {tracker.window}
+            if tracker.observe_active(active, group) == panels.HIDE:
+                try:
+                    self.ops.iconify(tracker.window)
+                except Exception:
+                    pass
+
+        self._adopt_pending_launch(windows)
+
+    def on_client_list_changed(self) -> None:
+        """A window appeared or vanished.
+
+        The launch waiter must not depend on the new window winning focus:
+        under focus-stealing prevention it will not, and _NET_ACTIVE_WINDOW
+        would then never fire for it at all.
+        """
+        try:
+            windows = self.ops.list_windows()
+        except Exception:
+            log.debug("could not list windows on client-list change",
+                      exc_info=True)
+            return
+        if windows is None:
+            # Unknown, not empty: there is nothing to adopt FROM, and the pending
+            # launch stays armed so the next event retries inside its 10s deadline.
+            log.debug("window list unreadable on client-list change; skipping")
+            return
+        self._adopt_pending_launch(windows)
+
+    def _adopt_pending_launch(self, windows) -> None:
+        """Adopt a window that appeared after a confirmed launch.
+
+        Idempotent: `pending` is cleared on success, so being called from more
+        than one event source is safe.
+        """
+        pending = self.launcher.pending
+        if pending is None or pending.launched_at is None:
+            return
+        chosen = choose(windows, pending.dial.match_class,
+                        since=pending.launched_at)
+        if chosen is None:
+            return
+        dial = pending.dial
+        try:
+            self.ops.apply_geometry(chosen.wid, self._rect_for(dial))
+            self.ops.apply_hints(chosen.wid,
+                                 above=(dial.on_focus_loss == "above"))
+            self._tracker(dial).activating(chosen.wid)
+            self.ops.activate(chosen.wid, self._confirm_timestamp)
+        except Exception:
+            # Do NOT clear `pending` here: leaving it armed lets the next event
+            # retry within the 10s deadline rather than orphaning the window.
+            log.warning("post-launch adoption failed for %#x", chosen.wid,
+                        exc_info=True)
+            return
+        self.launcher.window_found()
+
+    # ---- timing ----------------------------------------------------------
+
+    def select_timeout(self) -> float | None:
+        """Seconds until the nearest deadline, or None when nothing is armed.
+
+        None at idle is the single most important line in this file for the
+        resource budget.
+        """
+        now = self._clock()
+        deadlines = [d for d in (
+            self.assign.deadline(),
+            self.launcher.deadline(),
+            *(t.deadline() for t in self.trackers.values()),
+        ) if d is not None]
+        if not deadlines:
+            return None
+        return max(0.0, min(deadlines) - now)
+
+    def tick(self) -> None:
+        """Expire whatever is due. Called only after a select() timeout."""
+        self.assign.check_timeout()
+        self.launcher.check_timeout()
+        for tracker in self.trackers.values():
+            tracker.check_timeout()
+
+
+def _monitor_containing(rect: geometry.Rect, mons, root) -> geometry.Monitor:
+    """The monitor whose rect contains the window's centre point."""
+    cx, cy = rect.x + rect.w // 2, rect.y + rect.h // 2
+    for m in mons:
+        r = m.rect
+        if r.x <= cx < r.x + r.w and r.y <= cy < r.y + r.h:
+            return m
+    for m in mons:
+        if m.primary:
+            return m
+    return mons[0] if mons else geometry.Monitor("<root>", root, True, 0)
+
+
+def _spawn_confirm_dialog(request: OverwriteRequest) -> None:
+    """Launch dials-confirm as a separate process (keeps GTK out of here)."""
+    import json
+    import subprocess
+    payload = json.dumps({
+        "slot": request.incoming.slot,
+        "existing": {"label": request.existing.label,
+                     "match_class": request.existing.match_class,
+                     "monitor": request.existing.monitor,
+                     "rect": list(request.existing.rect)},
+        "incoming": {"label": request.incoming.label,
+                     "match_class": request.incoming.match_class,
+                     "monitor": request.incoming.monitor,
+                     "rect": list(request.incoming.rect)},
+    })
+    exe = os.path.join(os.path.dirname(sys.executable), "dials-confirm")
+    try:
+        subprocess.Popen([exe, payload], start_new_session=True)
+    except Exception:
+        from dials.notify import notify
+        notify("Dial not replaced",
+               f"Slot {request.incoming.slot} already holds "
+               f"{request.existing.label}; confirmation dialog unavailable")
+
+
+# ---- process entry point -------------------------------------------------
+
+def _report_grab_failures(failures: dict[int, list[int]]) -> None:
+    """Warn about grabs that could not be installed.
+
+    Used by startup AND by the resume path: a Dial that silently fails to come
+    back after `dials resume` is exactly as broken as one that never installed
+    at all, so both must be equally visible.
+    """
+    for kc, masks in failures.items():
+        print(f"warning: could not grab keycode {kc} for masks "
+              f"{[hex(m) for m in masks]}", file=sys.stderr)
+
+
+def _install_confirm_grabs(launcher, factory, notifier=None):
+    """Grab `Return` while a launch confirmation is pending.
+
+    Extracted from `main()` so the ABANDON decision is testable without an X
+    server: this branch decides whether a temporary GLOBAL `Return` grab is held
+    or given up, which is the most intrusive thing in the whole design.
+
+    Returns the GrabManager to hold, or None when `Return` could not be grabbed
+    at all - in which case the pending launch is cancelled and the user told,
+    since the ordinary way to reach the confirmation is gone.
+    """
+    if notifier is None:
+        from dials.notify import notify as notifier
+    extra = factory()
+    # grab_keycodes(), NOT confirm_keycodes(): the two differ and the difference
+    # is load-bearing. Only `Return` needs a temporary grab. KP_Enter is already
+    # grabbed permanently as Dial slot "enter" and `is_confirm()` routes it, and
+    # re-grabbing it HERE is actively destructive - a same-client duplicate grab
+    # succeeds silently and is not reference counted, so keycode 104 would join
+    # this manager's installed set and `release_confirm_grabs()` would ungrab the
+    # permanent grab, leaving the `enter` Dial dead and KP_Enter falling through
+    # to applications. Measured in
+    # docs/probes/09-duplicate-grab-same-client.py.
+    failures = extra.install(launcher.grab_keycodes())
+    if failures:
+        # Only `Return` is asked for now, so a failure here is real: another
+        # client holds Return on that modifier combination. Reported rather than
+        # discarded because otherwise an operator cannot tell why Enter did not
+        # work. (The old version logged keycode 104 as an EXPECTED failure here.
+        # That could never fire: the duplicate grab succeeded.)
+        log.warning(
+            "confirm-grab failures: %s",
+            {kc: [hex(m) for m in masks] for kc, masks in failures.items()},
+        )
+    if not extra.active:
+        # The guard asks "did anything at all get grabbed", never "on how many
+        # masks": `Return` grabbed for mask 0 but not LockMask still confirms
+        # fine with CapsLock off, so counting masks would spuriously abandon a
+        # launch that Return could still confirm.
+        #
+        # Abandoning is conservative rather than strictly forced: KP_Enter stays
+        # permanently grabbed, so the numpad Enter could in principle still reach
+        # this confirmation. Kept as-is deliberately - it is the only path that
+        # tells the user Return was taken by someone else - but it is NOT true
+        # that nobody could reach the confirmation.
+        extra.remove_all()
+        launcher.cancel()
+        notifier("Cannot confirm launch",
+                 "Return/Enter key unavailable (grabbed by another app); "
+                 "launch cancelled")
+        return None
+    return extra
+
+
+def _drain_events(d, handle) -> tuple[int, bool]:
+    """Hand every QUEUED X event to `handle`. Returns (processed, closed).
+
+    Extracted from `main()` so the starvation this fixes is testable without an X
+    server - the same reasoning that put `dispatch_key` and
+    `_install_confirm_grabs` outside the loop.
+
+    The queue is re-checked before EVERY read rather than snapshotted once. A
+    snapshot starves events that arrive DURING the handlers, and the handlers are
+    full of synchronous round trips (`list_windows()` is ~5 per window):
+    python-xlib queues whatever arrives while it reads those replies, those events
+    were not in the snapshot, and the socket has already been drained - so
+    select() does not report the fd readable again, and at idle select() blocks
+    with a None timeout by design. A focus-change PropertyNotify swallowed
+    mid-handler could therefore wait indefinitely, and an on_focus_loss="hide"
+    panel would not hide until some unrelated event happened to arrive.
+
+    This is NOT the previously-rejected `range(max(1, pending_events))`. That
+    version called `next_event()` on an EMPTY queue, which blocks indefinitely
+    (measured), freezing every Dial and every timeout. Here `next_event()` is
+    reached only when `pending_events()` has already reported a non-empty queue,
+    so it cannot block. `pending_events()` cannot block either: it is not a
+    passive queue-length read but `send_and_recv(recv=True)`, whose select() uses
+    `timeout=0` (python-xlib protocol/display.py), so it consumes whatever is
+    readable and returns the resulting EVENT count. A 0 means the readable bytes
+    were a reply or an error rather than an event; they have been consumed, so
+    returning to select() is correct.
+
+    The return value feeds `main()`'s dead-connection guard, which is why the
+    count is of events actually processed: a wakeup that yields none is exactly
+    the condition that guard watches for.
+    """
+    from Xlib.error import ConnectionClosedError
+
+    drained = 0
+    while True:
+        try:
+            if not d.pending_events():
+                return drained, False
+            event = d.next_event()
+        except ConnectionClosedError:
+            return drained, True
+        except Exception:
+            log.warning("X event read failed; returning to select()",
+                        exc_info=True)
+            return drained, False
+        drained += 1
+        handle(event)
+
+
+def main() -> int:
+    import socket
+
+    from Xlib import X, display
+
+    # Without this only logging.lastResort carries records, so every daemon
+    # diagnostic reached journald with no level and no logger name. journald
+    # supplies its own timestamp, so the format deliberately does not.
+    logging.basicConfig(level=logging.INFO,
+                        format="%(levelname)s %(name)s: %(message)s")
+
+    d = display.Display()
+    root = d.screen().root
+    ops = WindowOps(d, root)
+    mons = monitors_mod.MonitorSource(d, root)
+    mons.select_events()
+
+    root.change_attributes(event_mask=X.PropertyChangeMask)
+    d.sync()
+
+    daemon = Daemon(config=load(), ops=ops, monitors=mons)
+
+    grabs = GrabManager(d, root)
+    _report_grab_failures(grabs.install(keys.SLOT_KEYCODES.values()))
+
+    state_dir().mkdir(parents=True, exist_ok=True)
+    if (state_dir() / PAUSE_FLAG).exists():
+        daemon.pause()
+        grabs.remove_all()
+
+    # SIGHUP/SIGTERM must be able to break the select() block. Under PEP 475
+    # select() is auto-retried after a handler returns, so InterruptedError never
+    # fires; at idle the timeout is None by design, so without this the process
+    # would stay blocked indefinitely after a signal (measured: 3.01s block while
+    # the handler had already run at 0.4s). A wakeup fd turns a signal into
+    # readable bytes that select() can see.
+    #
+    # This is also what makes `dials pause` safe: the reload check sits at the
+    # top of the loop, so without a wakeup the first Dial keypress would be what
+    # woke select() and it would be DISPATCHED BEFORE the pause engaged -
+    # exactly backwards for a safety valve meant to protect a game session.
+    wake_r, wake_w = socket.socketpair()
+    for _s in (wake_r, wake_w):
+        _s.setblocking(False)
+    signal.set_wakeup_fd(wake_w.fileno())
+
+    reload_requested = False
+    stop_requested = False
+
+    def on_hup(_sig, _frame):
+        nonlocal reload_requested
+        reload_requested = True
+
+    def on_stop(_sig, _frame):
+        nonlocal stop_requested
+        stop_requested = True
+
+    signal.signal(signal.SIGHUP, on_hup)
+    signal.signal(signal.SIGTERM, on_stop)
+    signal.signal(signal.SIGINT, on_stop)
+
+    active_atom = d.intern_atom("_NET_ACTIVE_WINDOW")
+    # _NET_CLIENT_LIST is what drives the post-launch waiter when the new window
+    # does NOT win focus, which is the normal case under focus-stealing
+    # prevention. Both are root properties and PropertyChangeMask is already
+    # selected above, so this needs no event-mask change.
+    client_list_atom = d.intern_atom("_NET_CLIENT_LIST")
+    confirm_grabs_held = False
+    confirm_grabs = None          # initialised here, not inside a branch
+    xfd = d.fileno()
+    wake_fd = wake_r.fileno()
+    dead_ready = 0                # consecutive ready-but-no-events rounds
+
+    def release_confirm_grabs():
+        """Release the temporary `Return` grab ONLY.
+
+        Deliberately does not cancel the pending launch: this also runs on the
+        normal confirm -> wait-for-window transition, and cancelling there would
+        abandon the window the user just asked for.
+
+        Must be reachable from every exit path - pause, reload, shutdown -
+        because leaving `Return` grabbed would take Enter away system-wide.
+        """
+        nonlocal confirm_grabs_held
+        if confirm_grabs_held and confirm_grabs is not None:
+            confirm_grabs.remove_all()
+        confirm_grabs_held = False
+
+    def handle_event(event):
+        """Route one X event. Every branch already swallows its own failures."""
+        if mons.handles(event):
+            mons.invalidate()
+            return
+
+        if event.type == X.PropertyNotify:
+            if event.atom == active_atom:
+                daemon.on_active_window_changed()
+            elif event.atom == client_list_atom:
+                daemon.on_client_list_changed()
+            return
+
+        if event.type != X.KeyPress:
+            return
+
+        daemon.dispatch_key(event.detail, timestamp=event.time)
+
+    try:
+        while True:
+            # Checked before anything else so an orderly stop never dispatches
+            # one more keypress on its way out.
+            if stop_requested:
+                return 0
+
+            if reload_requested:
+                reload_requested = False
+                # Guards ONLY the load: a malformed hand-edited config must not
+                # kill the daemon (see Daemon.reload_from), while pause/resume
+                # must still be honoured on the same SIGHUP either way.
+                daemon.reload_from(load)
+                paused = (state_dir() / PAUSE_FLAG).exists()
+                if paused and not daemon.paused:
+                    daemon.pause()
+                    grabs.remove_all()
+                    # The confirm grabs are a SEPARATE set and would otherwise
+                    # survive the pause, leaving Return grabbed system-wide with a
+                    # confirmation nobody can reach - and, because is_confirm() is
+                    # checked before any pause gate, an Enter pressed for an
+                    # unrelated reason would still launch the app.
+                    release_confirm_grabs()
+                    daemon.launcher.cancel()
+                elif not paused and daemon.paused:
+                    daemon.resume()
+                    _report_grab_failures(
+                        grabs.install(keys.SLOT_KEYCODES.values()))
+
+            # Hold the temporary `Return` grab only while a confirmation is pending.
+            need = daemon.launcher.grabs_needed(confirm_grabs_held)
+            if need and not confirm_grabs_held and not daemon.paused:
+                extra = _install_confirm_grabs(
+                    daemon.launcher,
+                    lambda: GrabManager(d, root, masks=grabs.masks),
+                )
+                if extra is not None:
+                    confirm_grabs = extra
+                    confirm_grabs_held = True
+            elif confirm_grabs_held and not need:
+                release_confirm_grabs()
+
+            timeout = daemon.select_timeout()
+            try:
+                ready, _, _ = select.select([xfd, wake_fd], [], [], timeout)
+            except InterruptedError:      # pre-PEP-475 safety only
+                continue
+
+            if wake_fd in ready:
+                try:
+                    wake_r.recv(4096)     # drain; the flags carry the meaning
+                except BlockingIOError:
+                    pass
+
+            if not ready:
+                daemon.tick()
+                continue
+
+            if xfd not in ready:
+                # Signal-only wakeup: loop back so the flags are acted on now.
+                # Skipping the X read also keeps `dead_ready` honest.
+                continue
+
+            drained, closed = _drain_events(d, handle_event)
+            if closed:
+                print("dialsd: X connection closed; exiting for restart",
+                      file=sys.stderr)
+                return 1
+
+            # A peer-closed X socket is permanently readable while yielding no
+            # events, which would spin at 100% CPU forever. python-xlib does
+            # raise ConnectionClosedError on EOF, but this bounded guard also
+            # covers any readable-yet-eventless state it does not: exit so
+            # systemd (Restart=on-failure, PartOf=graphical-session.target) can
+            # restart us with the next session. Counted AFTER the drain now, but
+            # on the same condition as before: a wakeup that yielded no event at
+            # all still counts, and any event at all still clears the count.
+            if drained == 0:
+                dead_ready += 1
+                if dead_ready > MAX_DEAD_READY:
+                    print("dialsd: X fd readable with no events; assuming the "
+                          "connection is dead, exiting for restart",
+                          file=sys.stderr)
+                    return 1
+            else:
+                dead_ready = 0
+    finally:
+        # Orderly stop. Grabs being process-scoped only covers a CRASH; an
+        # orderly stop must not rely on that, and leaving `Return` grabbed
+        # would take Enter away system-wide until the next login.
+        release_confirm_grabs()
+        grabs.remove_all()
+        signal.set_wakeup_fd(-1)
+        wake_r.close()
+        wake_w.close()

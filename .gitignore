@@ -2,3 +2,10 @@
 __pycache__/
 .pytest_cache/
 *.egg-info/
+
+# Harness-managed git worktrees live here. Never commit them - the directory
+# holds full checkouts of this repo.
+.claude/worktrees/
+
+# Scratch workspace for plan-execution bookkeeping (ledger, briefs, reports).
+.superpowers/

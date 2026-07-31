@@ -1,0 +1,18 @@
+[Unit]
+Description=Dials tray indicator
+PartOf=graphical-session.target
+After=graphical-session.target dialsd.service
+
+[Service]
+Type=simple
+ExecStart=%h/.local/share/dials/venv/bin/dials-tray
+Restart=on-failure
+RestartSec=2
+# GTK costs more than the daemon it reports on, hence the separate unit and a
+# looser cap.
+MemoryMax=128M
+CPUQuota=5%
+Nice=10
+
+[Install]
+WantedBy=graphical-session.target
