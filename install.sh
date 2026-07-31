@@ -44,10 +44,33 @@ if [ -e "$LIVE_CONFIG" ]; then
   echo "  keeping existing $LIVE_CONFIG"
 else
   cp "$REPO/config/config.reference.toml" "$LIVE_CONFIG"
-  # Strip the reference header so the live file is not labelled "NOT LIVE".
-  sed -i '/^# REFERENCE COPY/,/^# Refresh this snapshot/d' "$LIVE_CONFIG"
+  # Strip the whole reference-only header so the live file is not labelled "NOT
+  # LIVE" and does not carry instructions for refreshing the *other* file. The
+  # range has to run to the end of that paragraph: stopping at "Refresh this
+  # snapshot" left the "WARNING: that command REGENERATES this file" lines
+  # behind, which in the live config referred to a file it is not.
+  sed -i '/^# REFERENCE COPY/,/^# them with `git checkout/d' "$LIVE_CONFIG"
+  # ...and the separator line that paragraph left behind at the very top.
+  sed -i '1{/^#[[:space:]]*$/d}' "$LIVE_CONFIG"
   echo "  wrote $LIVE_CONFIG"
 fi
+
+echo "==> installing tray icons"
+# The tray looks these up by NAME through the GTK icon theme, so they have to
+# live in a theme directory: a path inside the repo is not discoverable, and
+# would break the moment the checkout moved. hicolor is the fallback theme every
+# other theme inherits from, so this works whichever icon theme is active.
+ICON_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/icons/hicolor/scalable/apps"
+mkdir -p "$ICON_DIR"
+install -m 644 "$REPO"/icons/dials-shell*.svg "$ICON_DIR/"
+# Refresh the cache only if one exists. A user hicolor dir usually has no
+# index.theme and therefore no cache, in which case GTK reads the directory
+# directly and this would be a no-op that prints a confusing error.
+HICOLOR="${XDG_DATA_HOME:-$HOME/.local/share}/icons/hicolor"
+if [ -f "$HICOLOR/index.theme" ] && command -v gtk-update-icon-cache >/dev/null 2>&1; then
+  gtk-update-icon-cache -q -f -t "$HICOLOR" || true
+fi
+echo "  installed $(ls "$REPO"/icons/dials-shell*.svg | wc -l) icons into $ICON_DIR"
 
 echo "==> installing systemd units"
 mkdir -p "$UNIT_DIR"

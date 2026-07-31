@@ -18,15 +18,26 @@ monitor       = "HDMI-0"
 rect          = [0.0, 0.0, 0.5, 1.0]
 # normal = can be buried | above = never buried | hide = hides on focus loss
 on_focus_loss = "hide"
-# Re-apply geometry on every raise, not just on show. Off so hand-nudging a
-# window is not undone on the next keypress; use `dials capture <slot>` instead.
-pin_geometry  = false
+# Re-apply geometry on every raise, not just on show.
+#
+# ON, deliberately. Geometry is applied unconditionally on SHOW - i.e. when a
+# window comes back from minimised - but a window that was already visible the
+# first time the daemon saw it never goes through SHOW: every press on it is a
+# RAISE. With this off, such a window kept whatever size the app chose for
+# itself and no Dial ever placed it, which is not what a dropdown panel means.
+# The tradeoff accepted in exchange: hand-nudging a Dial window is undone on the
+# next keypress. Use `dials capture <slot>` to make a nudge permanent instead.
+pin_geometry  = true
 
 
-# Left half of the ultrawide.
+# Left half of the ultrawide: 50% wide, full height.
 [dials."9"]
 label         = "Spotify"
-match_class   = "spotify"
+# CAPITAL S. This matches the *class* field of WM_CLASS, and Spotify's is
+# ("spotify", "Spotify") - instance lowercase, class capitalised. Lowercase here
+# matched nothing, so the Dial reported "Spotify not running" while Spotify was
+# on screen, and offered to launch a second copy.
+match_class   = "Spotify"
 # The scale flag must stay: it is the min-width workaround from the sibling
 # spotify_width project. Without it Spotify refuses to go narrow.
 launch        = "/snap/bin/spotify --force-device-scale-factor=0.7"
@@ -36,7 +47,25 @@ rect          = [0.0, 0.0, 0.5, 1.0]
 on_focus_loss = "hide"
 
 
-# Right half of the ultrawide, so it can sit beside Spotify without overlapping.
+# Right half of the ultrawide: 50% wide, full height. Overlaps the Firefox Dial
+# below, which is fine - a Dial appearing over another is an ordinary focus
+# change, so nothing special-cases it.
+[dials."5"]
+label         = "Slack"
+# Slack's WM_CLASS is ("slack", "Slack"); the class field is what is matched.
+match_class   = "Slack"
+# Flatpak, not a deb or a snap - `flatpak list` shows com.slack.Slack under the
+# user installation, and there is no slack binary on PATH.
+launch        = "flatpak run com.slack.Slack"
+# No `icon` key on purpose: icons.py resolves the glyph from match_class
+# ("Slack" -> "slack" -> the Slack glyph), so hardcoding it here would just be a
+# second place to keep in sync.
+monitor       = "HDMI-0"
+rect          = [0.5, 0.0, 0.5, 1.0]
+on_focus_loss = "hide"
+
+
+# Right-hand 30% of the ultrawide, full height.
 [dials."6"]
 label         = "Firefox (dial6)"
 # Must stay in sync with --class in `launch` below - the class is what identifies
@@ -49,6 +78,8 @@ match_class   = "Dial6"
 launch        = "firefox -P dial6 --class=Dial6 --no-remote --new-instance"
 icon          = ""
 monitor       = "HDMI-0"
-rect          = [0.5, 0.0, 0.5, 1.0]
+# x = 0.7 so the 30% sits flush with the right edge (0.7 + 0.3 = 1.0). Fractions
+# must sum to at most 1.0 or the Dial would be placed off-monitor.
+rect          = [0.7, 0.0, 0.3, 1.0]
 # Stays up when focus moves elsewhere, and is never buried.
 on_focus_loss = "above"
