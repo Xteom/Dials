@@ -135,7 +135,8 @@ Firefox, or the monitor layout changes.
 
 `docs/IMPLEMENTATION-DECISIONS.md` records every decision taken while building
 this and what each one implies; `docs/RETROSPECTIVE.md` records the process
-failures worth not repeating.
+failures worth not repeating; **`docs/OPEN-PROBLEMS.md` is what is still wrong or
+unconfirmed** — read that before concluding something is broken.
 
 ## If Dials show up in alt-tab or the workspace overview
 
@@ -145,8 +146,22 @@ and the switcher so minimise-to-tray applications stay reachable — and its tes
 matches every Dial window. The hint meant to hide a Dial is what makes Pop Shell
 show it. (Guake escapes only because Pop Shell has it on a hardcoded allowlist.)
 
-Fix: add one rule per Dial class to `~/.config/pop-shell/config.json`, then reload
-GNOME Shell — on X11, Alt+F2 then `r`.
+Fix: add one rule per Dial class to `~/.config/pop-shell/config.json`, then make
+Pop Shell re-read it — it parses that file only when the extension is enabled and
+does not watch it:
+
+```sh
+gnome-extensions disable pop-shell@system76.com
+gnome-extensions enable  pop-shell@system76.com
+```
+
+**Not Alt+F2 → `r`.** That is the usual advice for reloading GNOME Shell on X11 and
+it *silently fails on this machine*: `/usr/libexec/mutter-restart-helper` is not
+shipped, so mutter logs "Failed to start restart helper" and carries on with the
+old process — leaving you convinced the config was loaded when it was not. Check
+`gnome-extensions info pop-shell@system76.com` if in doubt. The toggle above needs
+no helper binary. It re-initialises Pop Shell's auto-tiler, so if you run with
+`tile-by-default true` your windows may be re-tiled.
 
 ```json
 "skiptaskbarhidden": [

@@ -1092,10 +1092,24 @@ Preferred over `gsettings set org.gnome.shell.extensions.pop-shell show-skip-tas
 would disable the feature for every application — including genuine tray-minimised ones, which is
 the case it exists to serve.
 
-Pop Shell reads this file at startup and does not watch it, so a Shell reload is required: on X11,
-Alt+F2 then `r`. `install.sh` checks for the rules and prints instructions, but deliberately does not
-edit the file: it belongs to another extension, and a malformed `config.json` would take Pop Shell's
-tiling down with it.
+Pop Shell parses this file only when the extension is enabled — `conf.reload()` runs from its
+constructor and from its own exceptions dialog, and nothing watches the file — so it must be made to
+re-read it:
+
+```sh
+gnome-extensions disable pop-shell@system76.com && gnome-extensions enable pop-shell@system76.com
+```
+
+**Not `Alt+F2` then `r`.** That is the standard way to reload GNOME Shell on X11 and it **silently
+fails on this machine**: `/usr/libexec/mutter-restart-helper` is not shipped by this Pop!_OS install,
+so mutter logs `Failed to start restart helper` and keeps running the old process. The Shell's PID and
+start time are unchanged by a *successful* re-exec too, so neither is evidence either way — the
+journal line is. This cost a full round trip of "I restarted but it still shows", with a correct fix
+sitting unread on disk the whole time.
+
+`install.sh` checks for the rules and prints instructions, but deliberately does not edit the file: it
+belongs to another extension, and a malformed `config.json` would take Pop Shell's tiling down with
+it.
 
 Anything that adds a Dial for a new application needs a matching rule here. That coupling is the
 cost of this approach and is why it is written down rather than left in a commit message.

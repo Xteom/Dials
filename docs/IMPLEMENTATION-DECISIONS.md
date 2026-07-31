@@ -686,6 +686,26 @@ the question is "why does this desktop do X", the desktop's source is on disk:
 `/usr/share/gnome-shell/extensions/` are readable and authoritative. Read them
 first.
 
+**And then the fix appeared not to work, for a reason that was nothing to do with
+it.** `Alt+F2` then `r` — the standard way to reload GNOME Shell on X11 — **fails
+silently on this machine**: `/usr/libexec/mutter-restart-helper` is not shipped by
+this Pop!_OS install, so mutter logs `Failed to start restart helper` and carries
+on with the old process. The correct config sat unread on disk while the symptom
+persisted. `gnome-extensions disable … && enable …` needs no helper binary and is
+what the docs now say.
+
+Two things made that hard to see, and both are worth remembering:
+
+- **The obvious check was useless.** A *successful* Shell re-exec preserves the PID
+  and the process start time, so "the PID is unchanged" is not evidence the restart
+  failed — and neither is the converse. The journal line is the only evidence.
+- **Two `gsettings` keys, one of them imaginary.** The first lookup used
+  `show-skiptaskbar`, which does not exist, and `gsettings get` answered `No such
+  key` — which reads like "the feature is absent" rather than "you typed the wrong
+  name". The real key is `show-skip-taskbar`, and its value was `true` all along.
+  Its value was never checked until the fix appeared to fail, which is one round
+  trip later than it should have been.
+
 ### 8.8 Known rough edge: an app that minimises to the tray reads as "not running"
 
 Flatpak Slack unmaps its window and drops out of `_NET_CLIENT_LIST` when it

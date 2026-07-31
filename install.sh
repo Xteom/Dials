@@ -113,7 +113,12 @@ PY
     echo "        overview despite SKIP_TASKBAR:$missing"
     echo "        Add one rule per class to \"skiptaskbarhidden\" in"
     echo "        $POP_CONF, e.g. { \"class\": \"^Spotify\$\" }, then reload"
-    echo "        GNOME Shell (X11: Alt+F2, then r). Details: docs/superpowers/specs/."
+    echo "        pop-shell so it re-reads that file (it does not watch it):"
+    echo "          gnome-extensions disable pop-shell@system76.com \\"
+    echo "            && gnome-extensions enable pop-shell@system76.com"
+    echo "        NOT Alt+F2 then r - that needs /usr/libexec/mutter-restart-helper,"
+    echo "        which this Pop!_OS install does not ship, and it fails silently."
+    echo "        Details: docs/superpowers/specs/, \"Pop Shell interaction\"."
   else
     echo "  all Dial classes are already exempted"
   fi
