@@ -55,6 +55,9 @@ class FakeOps:
     def apply_hints(self, wid, above):
         self.calls.append(("hints", wid, above))
 
+    def place_on_current_desktop(self, wid):
+        self.calls.append(("desktop", wid))
+
     def activate(self, wid, timestamp):
         self.calls.append(("activate", wid, timestamp))
         self.active = wid
@@ -171,8 +174,9 @@ def test_hidden_window_is_shown_with_geometry_and_hints():
     d = daemon(ops)
     assert d.handle_slot("9", timestamp=222) == SHOW
     kinds = [c[0] for c in ops.calls]
-    assert kinds == ["geometry", "hints", "activate"]
-    # Geometry and hints BEFORE activation, so focus lands last.
+    # "desktop" = placed on the CURRENT workspace, which replaced STICKY.
+    assert kinds == ["geometry", "hints", "desktop", "activate"]
+    # Geometry, hints and workspace BEFORE activation, so focus lands last.
     assert ("activate", 5, 222) in ops.calls
 
 
@@ -235,6 +239,27 @@ def test_hide_does_not_apply_hints():
     ops = FakeOps(windows=[win(5)], active=5)
     assert daemon(ops).handle_slot("9", timestamp=1) == HIDE
     assert not any(c[0] == "hints" for c in ops.calls)
+
+
+def test_a_raise_moves_the_window_to_the_current_workspace():
+    """The replacement for STICKY, asserted at the CALL SITE.
+
+    Sticky met "reachable from any workspace" by putting the Dial on every
+    workspace, so a workspace switch dragged all of them along. Placing it on the
+    current workspace instead has to happen on a RAISE too, not only a SHOW: a
+    window that was already visible never goes through SHOW, so it would otherwise
+    stay stranded wherever it started.
+    """
+    ops = FakeOps(windows=[win(5)], active=999)          # visible, not active
+    assert daemon(ops).handle_slot("9", timestamp=1) == RAISE
+    assert ("desktop", 5) in ops.calls
+
+
+def test_hide_does_not_move_the_window_between_workspaces():
+    """Moving a window as you put it away would shuffle workspaces invisibly."""
+    ops = FakeOps(windows=[win(5)], active=5)
+    assert daemon(ops).handle_slot("9", timestamp=1) == HIDE
+    assert not any(c[0] == "desktop" for c in ops.calls)
 
 
 def test_active_window_is_iconified():
@@ -758,8 +783,10 @@ def test_a_launched_window_denied_focus_is_still_adopted():
     d.on_client_list_changed()
 
     kinds = [c[0] for c in ops.calls]
-    assert kinds == ["geometry", "hints", "activate"]
+    assert kinds == ["geometry", "hints", "desktop", "activate"]
     assert ("activate", 11, 4242) in ops.calls
+    assert ("desktop", 11) in ops.calls, \
+        "a launched window must land on the workspace you are on, not workspace 0"
     assert d.launcher.pending is None, "the waiter must stop waiting"
 
 

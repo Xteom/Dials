@@ -8,31 +8,18 @@ Last updated 2026-07-30.
 
 ---
 
-## 1. Dials reappear after a workspace swipe — because they are sticky, by design
+## 1. ~~Dials reappear after a workspace swipe~~ — FIXED 2026-07-30
 
-**Status: working as specified, but the specification may be wrong.**
+Sticky windows are `_NET_WM_DESKTOP = 0xFFFFFFFF`, i.e. present on *every*
+workspace, so a four-finger swipe carried every Dial along with it. Replaced with
+`_NET_WM_DESKTOP` set to `_NET_CURRENT_DESKTOP` on show, and `STICKY` explicitly
+removed. See the design doc's *Workspaces: current-desktop placement, not sticky*.
 
-A four-finger horizontal swipe on this desktop switches workspace. Dial windows
-carry `_NET_WM_STATE_STICKY` and report `_NET_WM_DESKTOP = 0xFFFFFFFF` (all
-workspaces), so they follow you onto every workspace. Verified: both live Dials
-report `4294967295` across three workspaces.
+Verified live: `sticky=True, desktop=4294967295` → `sticky=False, desktop=0`.
 
-This is not the alt-tab/overview problem in §2 and is not fixed by anything there.
-It is the direct consequence of an explicit design requirement — *"this windows
-should always be in all workspaces"* — and it is doing exactly that.
-
-The tension is that "reachable from any workspace" and "present on every
-workspace" are not the same wish, and STICKY grants the second to get the first.
-
-**The fix, if wanted:** drop `_NET_WM_STATE_STICKY` and instead set
-`_NET_WM_DESKTOP` to the *current* workspace as part of the show path. A Dial then
-appears on whichever workspace you are on and exists on no other. Guake offers
-exactly this choice, which is some evidence it is the behaviour people want from a
-dropdown.
-
-Not done unasked, because it reverses a stated requirement. It is a small change:
-one client message in `apply_hints`, `STICKY` removed from `PANEL_HINTS`, and the
-focus/geometry paths untouched.
+Kept here rather than deleted because the reasoning matters: the requirement was
+"always in all workspaces", sticky implemented it literally, and that was the
+wrong reading — "reachable from any workspace" was the actual wish.
 
 ## 2. Whether the Pop Shell rules actually fix alt-tab and the overview
 

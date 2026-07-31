@@ -91,13 +91,14 @@ from dials.geometry import Rect
 
 log = logging.getLogger(__name__)
 
-#: Applied to every Dial unconditionally. STICKY so a Dial is reachable from
-#: any workspace; SKIP_TASKBAR because mutter reads that same flag to exclude a
-#: window from alt-tab (see META_WINDOW_IN_NORMAL_TAB_CHAIN in
-#: mutter/src/core/window-private.h). Losing the taskbar entry is the accepted
+#: Applied to every Dial unconditionally. SKIP_TASKBAR because mutter reads that
+#: same flag to exclude a window from alt-tab (see META_WINDOW_IN_NORMAL_TAB_CHAIN
+#: in mutter/src/core/window-private.h). Losing the taskbar entry is the accepted
 #: cost of the alt-tab requirement.
+#:
+#: _NET_WM_STATE_STICKY is NOT here, and is actively removed - see `apply_hints`
+#: and `place_on_current_desktop`.
 PANEL_HINTS = (
-    "_NET_WM_STATE_STICKY",
     "_NET_WM_STATE_SKIP_TASKBAR",
     "_NET_WM_STATE_SKIP_PAGER",
 )
@@ -322,18 +323,54 @@ class WindowOps:
         an add-only version could never undo itself: changing a Dial from
         on_focus_loss="above" to "normal" left the window permanently on top
         until the app was restarted, and the config quietly disagreed with the
-        screen. The other three hints are unconditional, so they never need the
-        remove branch.
+        screen. The other hints are unconditional, so they never need the remove
+        branch.
+
+        STICKY is removed for the same add/remove reason, and additionally because
+        a window that was made sticky by an earlier version of this code stays
+        sticky forever otherwise - it is not enough to stop adding it. See
+        `place_on_current_desktop` for what replaces it.
         """
         for name in PANEL_HINTS:
             self._client_message(
                 wid, "_NET_WM_STATE",
                 [_STATE_ADD, self._atom(name), 0, _SOURCE_PAGER, 0],
             )
+        for name, on in (("_NET_WM_STATE_ABOVE", above),
+                         ("_NET_WM_STATE_STICKY", False)):
+            self._client_message(
+                wid, "_NET_WM_STATE",
+                [_STATE_ADD if on else _STATE_REMOVE,
+                 self._atom(name), 0, _SOURCE_PAGER, 0],
+            )
+
+    def current_desktop(self) -> int | None:
+        """The workspace index the user is looking at, or None if unreadable."""
+        v = self._prop(self.root.id, "_NET_CURRENT_DESKTOP")
+        return v[0] if v else None
+
+    def place_on_current_desktop(self, wid: int) -> None:
+        """Move `wid` to the workspace the user is on right now.
+
+        This replaces _NET_WM_STATE_STICKY, and the difference is the whole point.
+        Sticky satisfies "reachable from any workspace" by making the window
+        *present on every* workspace - so switching workspace (a four-finger swipe
+        here) carries every Dial along with you, which is not what a dropdown
+        panel should do.
+
+        Setting _NET_WM_DESKTOP to the current index gives the reachable half
+        without the present-everywhere half: pressing a Dial's key brings its
+        window to wherever you are, and it exists on no other workspace.
+
+        Unreadable _NET_CURRENT_DESKTOP is a no-op rather than a guess: leaving a
+        window where it is beats moving it to a workspace picked at random.
+        """
+        idx = self.current_desktop()
+        if idx is None:
+            log.debug("no _NET_CURRENT_DESKTOP; leaving window %#x where it is", wid)
+            return
         self._client_message(
-            wid, "_NET_WM_STATE",
-            [_STATE_ADD if above else _STATE_REMOVE,
-             self._atom("_NET_WM_STATE_ABOVE"), 0, _SOURCE_PAGER, 0],
+            wid, "_NET_WM_DESKTOP", [idx, _SOURCE_PAGER, 0, 0, 0],
         )
 
     def activate(self, wid: int, timestamp: int) -> None:

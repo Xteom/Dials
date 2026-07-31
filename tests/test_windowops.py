@@ -13,12 +13,25 @@ class FakeAtoms(dict):
 
 
 class FakeWindow:
-    def __init__(self, wid):
+    def __init__(self, wid, display=None):
         self.id = wid
         self.configured = None
+        self._display = display
 
     def configure(self, **kw):
         self.configured = kw
+
+    def get_full_property(self, atom, prop_type):
+        """Backed by FakeDisplay.props, so tests can set root properties.
+
+        Returning None for an absent property is the real behaviour and is what
+        exercises the unreadable-property paths.
+        """
+        if self._display is None:
+            return None
+        vals = self._display.props.get(self.id, {}).get(
+            self._display.get_atom_name(atom))
+        return _Prop(vals) if vals is not None else None
 
 
 class FakeDisplay:
@@ -26,6 +39,12 @@ class FakeDisplay:
         self.atoms = FakeAtoms()
         self.sent = []
         self.windows = {}
+        self.props = {}          # wid -> {atom name: [values]}
+
+    @property
+    def root_props(self):
+        """FakeRoot's id is 1, which is what WindowOps reads root props from."""
+        return self.props.setdefault(1, {})
 
     def intern_atom(self, name):
         return self.atoms[name]
@@ -37,7 +56,7 @@ class FakeDisplay:
         return "?"
 
     def create_resource_object(self, kind, wid):
-        return self.windows.setdefault(wid, FakeWindow(wid))
+        return self.windows.setdefault(wid, FakeWindow(wid, self))
 
     def flush(self):
         pass
@@ -94,13 +113,19 @@ class _FlakyWindow:
         return None
 
 
-def test_panel_hints_are_the_three_unconditional_ones():
-    """ABOVE is deliberately NOT here - it is conditional on on_focus_loss."""
+def test_panel_hints_are_the_two_unconditional_ones():
+    """ABOVE is not here - it is conditional on on_focus_loss.
+
+    STICKY is not here either, and that is the interesting one: it satisfied
+    "reachable from any workspace" by putting the Dial on EVERY workspace, so
+    switching workspace dragged every Dial along. `place_on_current_desktop`
+    replaces it.
+    """
     assert PANEL_HINTS == (
-        "_NET_WM_STATE_STICKY",
         "_NET_WM_STATE_SKIP_TASKBAR",
         "_NET_WM_STATE_SKIP_PAGER",
     )
+    assert "_NET_WM_STATE_STICKY" not in PANEL_HINTS
 
 
 def test_apply_geometry_asks_for_the_rect_with_static_gravity_and_pager_source():
@@ -143,12 +168,11 @@ def test_apply_geometry_never_sends_a_plain_configure_request():
         "configure(x=, y=) sets the FRAME position, not the client's - that was C2"
 
 
-def test_apply_hints_always_sets_sticky_skip_taskbar_and_skip_pager():
+def test_apply_hints_always_sets_skip_taskbar_and_skip_pager():
     o, d = ops()
     o.apply_hints(0x500001, above=False)
     props = {d.get_atom_name(ev.data[1][1]) for ev, _ in d.sent}
-    assert {"_NET_WM_STATE_STICKY", "_NET_WM_STATE_SKIP_TASKBAR",
-            "_NET_WM_STATE_SKIP_PAGER"} <= props
+    assert {"_NET_WM_STATE_SKIP_TASKBAR", "_NET_WM_STATE_SKIP_PAGER"} <= props
 
 
 def _above_action(display):
@@ -180,15 +204,66 @@ def test_apply_hints_explicitly_removes_above_when_not_requested():
     assert _above_action(d) == 0                      # 0 = _NET_WM_STATE_REMOVE
 
 
-def test_apply_hints_never_removes_the_three_unconditional_panel_hints():
-    """Sticky/skip-taskbar/skip-pager are what make a Dial a panel at all."""
+def test_apply_hints_never_removes_the_unconditional_panel_hints():
+    """skip-taskbar/skip-pager are what make a Dial a panel at all."""
+    conditional = {"_NET_WM_STATE_ABOVE", "_NET_WM_STATE_STICKY"}
     for above in (True, False):
         o, d = ops()
         o.apply_hints(0x500001, above=above)
         for ev, _ in d.sent:
             name = d.get_atom_name(ev.data[1][1])
-            if name != "_NET_WM_STATE_ABOVE":
+            if name not in conditional:
                 assert ev.data[1][0] == 1, f"{name} must always be added"
+
+
+def _action_for(display, atom_name):
+    actions = [ev.data[1][0] for ev, _ in display.sent
+               if display.get_atom_name(ev.data[1][1]) == atom_name]
+    assert len(actions) <= 1, f"{atom_name} must be addressed at most once"
+    return actions[0] if actions else None
+
+
+def test_apply_hints_actively_removes_sticky():
+    """Not merely "stops adding it".
+
+    A window made sticky by an earlier version stays sticky forever unless the
+    REMOVE is sent, because _NET_WM_STATE is add/remove and never an assignment.
+    Dropping STICKY from PANEL_HINTS alone would have left every already-running
+    Dial on every workspace, which is the exact symptom being fixed.
+    """
+    for above in (True, False):
+        o, d = ops()
+        o.apply_hints(0x500001, above=above)
+        assert _action_for(d, "_NET_WM_STATE_STICKY") == 0   # 0 = REMOVE
+
+
+def test_place_on_current_desktop_sends_the_current_index_with_pager_source():
+    o, d = ops()
+    d.root_props["_NET_CURRENT_DESKTOP"] = [2]
+    o.place_on_current_desktop(0x500001)
+    ev, _ = d.sent[-1]
+    assert d.get_atom_name(ev.client_type) == "_NET_WM_DESKTOP"
+    assert ev.data[1][0] == 2
+    assert ev.data[1][1] == 2                                # source: pager
+
+
+def test_place_on_current_desktop_handles_workspace_zero():
+    """Workspace 0 is a real index, and `if not idx` would silently skip it."""
+    o, d = ops()
+    d.root_props["_NET_CURRENT_DESKTOP"] = [0]
+    o.place_on_current_desktop(0x500001)
+    ev, _ = d.sent[-1]
+    assert d.get_atom_name(ev.client_type) == "_NET_WM_DESKTOP"
+    assert ev.data[1][0] == 0
+
+
+def test_place_on_current_desktop_does_nothing_when_the_desktop_is_unreadable():
+    """Better to leave a window where it is than move it to a guessed workspace."""
+    o, d = ops()
+    d.root_props.pop("_NET_CURRENT_DESKTOP", None)
+    o.place_on_current_desktop(0x500001)
+    assert not [ev for ev, _ in d.sent
+                if d.get_atom_name(ev.client_type) == "_NET_WM_DESKTOP"]
 
 
 def test_activate_sends_the_supplied_timestamp_not_currenttime():
@@ -223,16 +298,23 @@ def test_state_messages_use_substructure_masks():
     assert mask == X.SubstructureRedirectMask | X.SubstructureNotifyMask
 
 
-def test_apply_hints_uses_add_action_and_pager_source():
+def test_apply_hints_uses_the_pager_source_on_every_message():
     """_NET_WM_STATE messages carry a source indication too, not just
-    _NET_ACTIVE_WINDOW - action must be "add" (1) and source must be
-    pager (2) on every hint message."""
-    o, d = ops()
-    o.apply_hints(0x500001, above=True)
-    assert d.sent
-    for ev, _ in d.sent:
-        assert ev.data[1][0] == 1
-        assert ev.data[1][3] == 2
+    _NET_ACTIVE_WINDOW: it must be pager (2) on every one of them.
+
+    The ACTION is deliberately not asserted uniformly here - STICKY is always a
+    REMOVE and ABOVE depends on on_focus_loss, so a blanket "everything is an
+    add" would have to be loosened the next time a conditional hint appears.
+    Per-atom actions are asserted by the tests above.
+    """
+    for above in (True, False):
+        o, d = ops()
+        o.apply_hints(0x500001, above=above)
+        assert d.sent
+        for ev, _ in d.sent:
+            name = d.get_atom_name(ev.data[1][1])
+            assert ev.data[1][3] == 2, f"{name} must use the pager source"
+            assert ev.data[1][0] in (0, 1), f"{name} action must be add or remove"
 
 
 def test_a_failing_client_message_is_logged_and_swallowed(caplog):

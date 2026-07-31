@@ -48,13 +48,16 @@ def reapply_hints(action: str) -> bool:
     SHOW *and* RAISE - and deliberately NOT gated on `pin_geometry`, which is
     about position, not about window properties.
 
-    The hints are what keep a Dial sticky across workspaces and out of the
-    taskbar and switcher. A window that was already visible the first time the
-    daemon saw it never goes through SHOW: every press on it is a RAISE, or a
-    HIDE. Gating hints on SHOW therefore meant such a window never received them
-    at all, so it stayed in the switcher and on a single workspace forever -
-    which is exactly what was reported for the Firefox Dial. They are idempotent
-    client messages, a handful per press, and never run at idle.
+    The hints are what keep a Dial out of the taskbar and the switcher. This same
+    condition also gates moving the window to the current workspace, which is what
+    replaced `_NET_WM_STATE_STICKY`.
+
+    A window that was already visible the first time the daemon saw it never goes
+    through SHOW: every press on it is a RAISE, or a HIDE. Gating on SHOW therefore
+    meant such a window never received the hints at all, so it stayed in the
+    switcher forever - exactly what was reported for the Firefox Dial - and would
+    now also stay stranded on whichever workspace it started on. They are
+    idempotent client messages, a handful per press, and never run at idle.
     """
     return action in (SHOW, RAISE)
 

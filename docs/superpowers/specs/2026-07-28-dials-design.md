@@ -197,8 +197,8 @@ Hints are re-applied on a RAISE as well as a SHOW, and deliberately are **not**
 gated on `pin_geometry`: that setting governs position, and the hints are window
 properties. The distinction is load-bearing. A window that was already visible the
 first time the daemon saw it never goes through SHOW — every press on it is a RAISE
-— so gating hints on SHOW left such a window non-sticky and still in the switcher
-no matter how often its Dial was pressed.
+— so gating hints on SHOW left such a window still in the switcher, and stranded on
+whichever workspace it started on, no matter how often its Dial was pressed.
 
 `_NET_WM_STATE_ABOVE` is also explicitly **removed** when `on_focus_loss` is not
 `"above"`, rather than merely not added. `_NET_WM_STATE` messages are add/remove,
@@ -345,12 +345,45 @@ Two consequences of applying the rule uniformly, stated so they are not read as 
   same thing clicking on the dialog would do, and it is left consistent rather than special-cased.
 - The launch-confirmation notification does **not** take focus, so it never disturbs a showing Dial.
 
-`_NET_WM_STATE_STICKY`, `SKIP_TASKBAR` and `SKIP_PAGER` are applied to every Dial unconditionally:
-Dials must be reachable from any workspace and must never appear in alt-tab.
+`SKIP_TASKBAR` and `SKIP_PAGER` are applied to every Dial unconditionally: a Dial must never appear
+in alt-tab.
 
 **Accepted trade (confirmed by the user):** per the mutter source above, `skip_taskbar` is the same
 flag the window list uses, so Dials get no taskbar entry either. Alt-tab exclusion is the
 requirement; taskbar presence was optional.
+
+### Workspaces: current-desktop placement, not sticky
+
+**`_NET_WM_STATE_STICKY` was the original mechanism and has been replaced.** The requirement was
+*"these windows should always be in all workspaces"*, and sticky delivers that literally — which
+turned out to be the wrong reading of it.
+
+Sticky satisfies *"reachable from any workspace"* by making the window **present on every**
+workspace. Those are different wishes, and the difference is visible the moment you change
+workspace: a four-finger swipe carried every Dial along, so switching away from Spotify showed you
+Spotify again. Verified before the change — both Dials reported `_NET_WM_DESKTOP = 0xFFFFFFFF`
+across three workspaces.
+
+So the show path now sends `_NET_WM_DESKTOP` with the value of `_NET_CURRENT_DESKTOP` instead. A
+Dial appears on whichever workspace you are on, and exists on no other. Pressing its key is still
+how you reach it from anywhere, which was the actual requirement. Guake offers exactly this choice,
+which is some evidence it is what people want from a dropdown.
+
+Three details that are easy to get wrong:
+
+- **`STICKY` must be actively REMOVED, not merely no longer added.** `_NET_WM_STATE` is
+  add/remove and never a whole-state assignment, so any window made sticky by an earlier version
+  stays sticky forever otherwise. Same trap as `ABOVE`.
+- **It is gated on the same condition as the hints**, i.e. SHOW *and* RAISE. A window that was
+  already visible never goes through SHOW, so gating on SHOW would leave it stranded on whichever
+  workspace it happened to start on.
+- **An unreadable `_NET_CURRENT_DESKTOP` is a no-op, not a guess.** Leaving a window where it is
+  beats moving it to a workspace chosen at random. Note that workspace `0` is a legitimate index,
+  so the guard is `is None` and not a truthiness test — the kind of defaulting bug this project has
+  already had once.
+
+Verified live: the Spotify Dial went from `sticky=True, _NET_WM_DESKTOP=4294967295` to
+`sticky=False, _NET_WM_DESKTOP=0` on the current workspace.
 
 ## Monitors
 

@@ -706,7 +706,42 @@ Two things made that hard to see, and both are worth remembering:
   Its value was never checked until the fix appeared to fail, which is one round
   trip later than it should have been.
 
-### 8.8 Known rough edge: an app that minimises to the tray reads as "not running"
+### 8.8 Sticky was the wrong reading of "always in all workspaces"
+
+The original requirement was *"this windows should always be in all workspaces"*,
+and `_NET_WM_STATE_STICKY` implements that literally: the window reports
+`_NET_WM_DESKTOP = 0xFFFFFFFF` and is present on every workspace. It shipped that
+way and satisfied the sentence exactly.
+
+It was still wrong, and the symptom showed it: a four-finger swipe switches
+workspace, so switching away from Spotify showed you Spotify again — the Dials
+followed. **"Reachable from any workspace" and "present on every workspace" are
+different wishes**, and sticky grants the second in order to get the first.
+
+**Decision.** Send `_NET_WM_DESKTOP` with the value of `_NET_CURRENT_DESKTOP` on
+the same SHOW/RAISE condition as the hints, and remove `STICKY`. A Dial now appears
+on whichever workspace you are on and exists on no other; pressing its key is still
+how you reach it from anywhere, which was the actual requirement.
+
+**Implication.** Three details had to be right, and each is a trap this project has
+hit before in another form:
+
+- `STICKY` is **actively removed**, not merely no longer added — otherwise every
+  window made sticky by the previous version stays sticky forever. Identical to the
+  `ABOVE` bug in §8.3, found the same day, which is why it was anticipated here
+  rather than discovered.
+- It is gated on SHOW **and** RAISE, for the reason in §8.2: an already-visible
+  window never goes through SHOW, so it would have stayed stranded on whatever
+  workspace it started on.
+- Workspace `0` is a real index, so the unreadable-property guard is `is None` and
+  not a truthiness test. `if not idx` would have silently skipped the most common
+  workspace on the machine.
+
+Both halves were mutation-tested before being believed: removing the call site
+fails two daemon tests, and reverting to add-only sticky handling fails one
+`WindowOps` test.
+
+### 8.9 Known rough edge: an app that minimises to the tray reads as "not running"
 
 Flatpak Slack unmaps its window and drops out of `_NET_CLIENT_LIST` when it
 minimises to the system tray. `list_windows()` correctly does not see it, so the
