@@ -2,13 +2,14 @@
 
 ## What this document is for
 
-Three documents already exist and this one deliberately does not repeat them:
+Other documents already exist and this one deliberately does not repeat them:
 
 | Document | Covers |
 | --- | --- |
 | `docs/superpowers/specs/2026-07-28-dials-design.md` | The **design** and its rationale, settled before any code |
 | `docs/superpowers/plans/2026-07-30-dials*.md` | The task breakdown and the code as planned |
 | `docs/RETROSPECTIVE.md` | The **process** lessons and failure patterns |
+| `docs/OPEN-PROBLEMS.md` | What is still wrong, unconfirmed, or worked around |
 | `docs/FIREFOX-DIAL6.md` | Why the Firefox Dial's profile is tuned, and how |
 
 What none of them records is the set of decisions forced by **executing** the
@@ -278,7 +279,7 @@ worse failure than "exits too eagerly".
 
 Geometry, monitor selection, the action table, the focus state machine, window
 selection and config validation are pure and tested without a display. This is why
-394 tests run in under half a second and why the subtle logic could be
+400 tests run in under half a second and why the subtle logic could be
 mutation-tested at all.
 
 **Implication.** A handler that reaches for X directly instead of its injected seam

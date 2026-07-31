@@ -7,7 +7,7 @@ those two cannot: what went wrong in the process itself.
 
 ## Outcome
 
-22 planned tasks, 394 tests, 0 skips. Most load-bearing X11 claims were verified on
+22 planned tasks, 400 tests, 0 skips. Most load-bearing X11 claims were verified on
 the target machine before being written down — the probe scripts in `docs/probes/`
 are that evidence and can be re-run if GNOME, Firefox or the monitor layout changes.
 

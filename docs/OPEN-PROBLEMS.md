@@ -23,7 +23,11 @@ wrong reading — "reachable from any workspace" was the actual wish.
 
 ## 2. Pop Shell's documented per-class rules are dead code — upstream bug
 
-**Status: root cause found, working switch applied, effect awaiting one look.**
+**Status: root cause found, working switch applied, CONFIRMED WORKING 2026-07-31.**
+Dials no longer appear in alt-tab or the workspace overview. Kept in this file
+because the upstream bug is still there and the workaround is still load-bearing:
+anyone who re-enables `show-skip-taskbar`, or who reasons from Pop Shell's own
+documentation, will land straight back here.
 
 `SKIP_TASKBAR` is necessary but not sufficient here; `pop-shell` deliberately shows
 skip-taskbar windows. Full mechanism with source excerpts: the design doc's *Pop
@@ -52,11 +56,8 @@ The three inert `skiptaskbarhidden` rules are left in `config.json`. They cost
 nothing and become correct if the bug is fixed — recorded here so their presence is
 never read as evidence they do something.
 
-**Still to do:** actually look at alt-tab and the overview since the gsettings
-change. Two rounds of "still showing" have already been spent on symptoms that
-turned out to be other things (§1, and then this).
-
-**Not reported upstream.** Worth doing; nobody has.
+**Not reported upstream.** Worth doing; nobody has. It is a two-line fix in
+`config.js`: add `this.skiptaskbarhidden = c.skiptaskbarhidden;` to `reload()`.
 
 ### The method failure worth keeping
 

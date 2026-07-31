@@ -42,6 +42,11 @@ Pressing a Dial's key does the useful thing in all three states: hidden → show
 visible but buried → raise, visible and focused → hide. So a buried window is
 never lost behind a double-press.
 
+A Dial comes to **whichever workspace you are on** and lives on no other, so
+switching workspace leaves it behind. It is reachable from anywhere by its key;
+it is not present everywhere. (It was `_NET_WM_STATE_STICKY` — present on every
+workspace — until that turned out to be a literal reading of the wrong wish.)
+
 ```sh
 dials list          # every slot
 dials status        # paused or active, how many Dials are bound, config health
@@ -73,6 +78,15 @@ probe and gone by the next. An absent monitor falls back to primary.
 
 No apt packages, no dconf keys, no X keymap changes, no changes to Firefox's
 `profiles.ini`.
+
+**Two things a working setup needs that neither script installs**, because both
+belong to software this project does not own:
+
+- `gsettings set org.gnome.shell.extensions.pop-shell show-skip-taskbar false`,
+  without which Dials appear in alt-tab and the workspace overview. `install.sh`
+  checks and prints it; see the section below for why.
+- The Firefox Dial's profile tuning at `~/.mozilla/firefox/<profile>/user.js`. See
+  `docs/FIREFOX-DIAL6.md`.
 
 The Firefox Dial's own profile is a separate matter: it has hand-written tuning at
 `~/.mozilla/firefox/<profile>/user.js` that neither script installs or removes.
@@ -125,6 +139,30 @@ of idle** — the concrete proof that `select()` blocks with a `None` timeout an
 the process is not scheduled at all when nothing is armed. Startup reported no
 grab failures. `dials-tray` remains opt-in specifically because it is the only
 component in the project that polls.
+
+## Development
+
+```sh
+uv venv --python /usr/bin/python3.10 --system-site-packages --allow-existing .venv
+VIRTUAL_ENV=.venv uv pip install -e . pytest
+.venv/bin/python -m pytest -q
+```
+
+`.venv/` is git-ignored and is separate from the runtime venv `install.sh` creates
+at `~/.local/share/dials/venv` — that one deliberately has no pytest.
+
+Three constraints that are not obvious and each cost time once:
+
+- **`--system-site-packages` is required**, because the tray and the confirm dialog
+  reach the system PyGObject, which is ABI-locked to python3.10. Never `uv run` or
+  `uv sync`: both recreate the venv *without* system site packages.
+- **Run pytest from the repo root, and not from a directory that contains a `dials/`
+  package.** `sys.path[0]` is the working directory, so a sibling checkout or a
+  worktree silently shadows the installed package and you test the wrong copy.
+  `PYTHONPATH` does not fix it — the editable-install finder runs first.
+- **Mutation-test any fix that is one line in a caller.** This project has twice
+  shipped a fix covered only by a test on the pure predicate, where reverting the
+  caller left the whole suite green. Break the call site, watch a test fail, restore.
 
 ## Design and verification
 
@@ -182,9 +220,9 @@ before changing the second.
 
 ## Human verification required
 
-A few checks depend on physical hardware and human judgment and cannot be
-covered by the automated test suite or by this task's measurement pass. Do
-these once, after choosing to install:
+These depend on physical hardware or human judgment and cannot be covered by the
+test suite. Dials is installed and in daily use as of 2026-07-31, and the tray
+icon is confirmed to render — everything below is still **outstanding**:
 
 - **CapsLock regression guard.** With NumLock off and CapsLock **on**, press a
   Dial key. It must still fire. This is the probe-07 mask-0 regression check:
