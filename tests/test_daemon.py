@@ -120,6 +120,52 @@ def test_missing_window_arms_a_launch_confirmation():
     assert ops.calls == []      # nothing spawned or touched
 
 
+#: A Dial exactly as assign mode produces one: no `launch` at all. That is the
+#: normal shape for anything the user bound themselves, since dials/assign.py
+#: always sets launch=None.
+NO_LAUNCH_CONFIG = loads("""
+[dials."9"]
+label = "Kitty"
+match_class = "kitty"
+""")
+
+
+def test_a_missing_window_for_a_launch_less_dial_arms_nothing():
+    """No arming, no grab request, and no "Press Enter" for a Dial that cannot
+    launch anything.
+
+    Arming took `Return` away from the focused application for 5 seconds and
+    showed a notification that was simply untrue; only confirm() ever noticed
+    there was no command. Assign mode always produces launch=None, so this was
+    most user-created Dials, every time the app was closed.
+    """
+    notes = Notes()
+    ops = FakeOps(windows=[])
+    d = daemon(ops, config=NO_LAUNCH_CONFIG, notifier=notes)
+
+    assert d.handle_slot("9", timestamp=1) == LAUNCH      # the DECISION stands
+    assert d.launcher.pending is None, "armed a confirmation with nothing to run"
+    assert d.launcher.grabs_needed(False) is False, \
+        "main() would grab Return system-wide for five seconds"
+    assert d.select_timeout() is None, "and would keep the daemon awake for it"
+    assert not notes.mentions("press enter"), "the notification was untrue"
+    assert notes.mentions("no launch command")
+    assert notes.mentions("not running")
+    assert ops.calls == []
+
+
+def test_return_is_not_intercepted_after_a_launch_less_dial_press():
+    """The consequence that mattered: Enter keeps working in the focused app."""
+    spawned = []
+    d = daemon(FakeOps(windows=[]), config=NO_LAUNCH_CONFIG,
+               spawner=spawned.append)
+    d.dispatch_key(keys.keycode_for("9"), timestamp=10)
+
+    assert d.launcher.is_confirm(keys.RETURN_KEYCODE) is False
+    assert d.dispatch_key(keys.RETURN_KEYCODE, timestamp=20) is None
+    assert spawned == []
+
+
 def test_hidden_window_is_shown_with_geometry_and_hints():
     ops = FakeOps(windows=[win(5)], hidden=[5])
     d = daemon(ops)

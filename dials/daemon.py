@@ -148,7 +148,7 @@ class Daemon:
     # ---- dispatch --------------------------------------------------------
 
     def handle_slot(self, slot: str, timestamp: int) -> str | None:
-        """Run one Dial keypress. Returns the action taken, or None."""
+        """Run one Dial keypress. Returns the action decided, or None."""
         if self._paused:
             return None
 
@@ -177,6 +177,10 @@ class Daemon:
             action = panels.decide(found, hidden, is_active)
 
             if action == panels.LAUNCH:
+                # arm() refuses and notifies honestly when dial.launch is empty,
+                # so no global `Return` grab is taken for a Dial that could not
+                # launch anything. The tag is the action DECIDED; whether a
+                # confirmation is now pending is launcher.pending's business.
                 self.launcher.arm(dial)
                 return action
 

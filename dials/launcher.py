@@ -73,8 +73,23 @@ class LaunchCoordinator:
 
     # ---- arming ----------------------------------------------------------
 
-    def arm(self, dial: Dial) -> PendingLaunch:
-        """Ask for confirmation. Does NOT launch anything."""
+    def arm(self, dial: Dial) -> PendingLaunch | None:
+        """Ask for confirmation. Does NOT launch anything.
+
+        Refuses outright, returning None, when the Dial has no launch command.
+        Arming one would take `Return` away from the focused application for
+        CONFIRM_TIMEOUT seconds and promise "Press Enter to launch it", which is
+        untrue - only `confirm()` ever noticed there was nothing to run. Assign
+        mode always produces `launch=None` (dials/assign.py), so a Dial with no
+        command is the NORMAL case for anything the user bound themselves, not an
+        edge case: this was most Dials, every time the app was closed.
+        """
+        if not dial.launch:
+            self._notify(
+                f"{dial.label} is not running",
+                f"and this Dial has no launch command  (Dial {dial.slot})",
+            )
+            return None
         self.pending = PendingLaunch(slot=dial.slot, dial=dial,
                                      armed_at=self._clock())
         self._notify(
@@ -129,6 +144,10 @@ class LaunchCoordinator:
         if p is None:
             return False
         if not p.dial.launch:
+            # Defensive net only: `arm()` refuses a launch-less Dial, so nothing
+            # should be able to reach here. Kept because a state this guard
+            # catches is one where the alternative is a confusing crash in
+            # `_spawn`, and it costs one branch.
             self._notify(f"{p.dial.label}: no launch command configured")
             self.pending = None
             return False

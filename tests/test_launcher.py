@@ -129,13 +129,45 @@ def test_confirm_starts_the_wait_window():
     assert c.deadline() == clk.t + LAUNCH_WAIT_TIMEOUT
 
 
-def test_confirm_with_no_launch_command_notifies_and_clears():
+def test_arm_refuses_a_dial_with_no_launch_command():
+    """Arming one would take `Return` from the focused app for 5s and promise
+    "Press Enter to launch it" for a Dial that cannot launch anything.
+
+    Assign mode always produces launch=None, so this is the normal case for
+    anything the user bound themselves - not an edge case.
+    """
     notifier = FakeNotifier()
     c = coord(notifier=notifier)
-    c.arm(dial(launch=None))
+
+    assert c.arm(dial(launch=None)) is None
+    assert c.pending is None, "a confirmation was armed with nothing to confirm"
+    assert c.grabs_needed(installed=False) is False, \
+        "the daemon would grab Return system-wide for this"
+    assert c.deadline() is None, "and would stay awake waiting for it"
+
+    text = " ".join(s + " " + b for s, b in notifier.messages).lower()
+    assert "press enter" not in text, "the notification was untrue"
+    assert "no launch command" in text
+    assert "is not running" in text
+
+
+def test_confirm_with_no_launch_command_notifies_and_clears():
+    """The defensive net inside confirm().
+
+    Built by setting `pending` directly, NOT through arm(): arm() now refuses a
+    launch-less Dial, so going through it would leave `pending` None and this
+    test would pass without ever reaching the branch it exists for - and the
+    "no launch" wording arm() itself emits would satisfy the assertion too.
+    """
+    from dials.launcher import PendingLaunch
+
+    notifier = FakeNotifier()
+    c = coord(notifier=notifier)
+    c.pending = PendingLaunch(slot="9", dial=dial(launch=None), armed_at=0.0)
+
     assert c.confirm() is False
     assert c.pending is None
-    assert any("no launch" in b.lower() or "no launch" in s.lower()
+    assert any("no launch command configured" in (s + " " + b).lower()
                for s, b in notifier.messages)
 
 
