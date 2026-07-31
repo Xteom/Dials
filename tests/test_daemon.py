@@ -182,6 +182,83 @@ def test_an_unbound_slot_is_a_no_op():
     assert ops.calls == []
 
 
+# ---- an UNREADABLE window list is not an empty one ----------------------
+
+def test_an_unreadable_window_list_does_not_offer_to_launch_a_running_app(caplog):
+    """The whole point of list_windows() returning None.
+
+    A transient X error used to yield [], every Dial then looked unlaunched, and
+    a keypress on a RUNNING app took the LAUNCH branch - so confirming started a
+    duplicate instance. Dropping the press is the cheap failure.
+    """
+    ops = FakeOps(windows=[win(5)])         # the app IS running
+    ops.list_windows = lambda: None         # ...but the list cannot be read
+    d = daemon(ops)
+
+    with caplog.at_level("WARNING"):
+        assert d.handle_slot("9", timestamp=1) is None
+
+    assert d.launcher.pending is None, \
+        "a transient read failure armed a launch for a running app"
+    assert ops.calls == []
+    assert any("unreadable" in r.getMessage() for r in caplog.records)
+
+
+def test_an_unreadable_window_list_on_focus_change_hides_nothing():
+    """Reconciling trackers against a guessed-empty list would look like every
+    window vanished. Unknown means do nothing and wait for the next event."""
+    ops = FakeOps(windows=[win(5)], hidden=[5])
+    d = daemon(ops)
+    d.handle_slot("9", timestamp=1)              # SHOW -> activating
+    d.on_active_window_changed()                 # tracker arms
+    before = list(ops.calls)
+
+    ops.active = 999                             # focus moves away
+    ops.list_windows = lambda: None
+    d.on_active_window_changed()
+
+    assert ops.calls == before, "acted on an unknown window list"
+    assert ("iconify", 5) not in ops.calls
+
+
+def test_an_unreadable_window_list_does_not_abandon_a_pending_launch():
+    """There is nothing to adopt FROM, so the waiter must stay armed and retry
+    inside its 10s deadline rather than give the window up."""
+    clk = FakeClock()
+    ops = FakeOps(windows=[])
+    d = daemon(ops, clock=clk)
+    d.dispatch_key(keys.keycode_for("9"), timestamp=10)
+    d.dispatch_key(keys.RETURN_KEYCODE, timestamp=20)
+
+    ops.list_windows = lambda: None
+    d.on_client_list_changed()
+
+    assert ops.calls == []
+    assert d.launcher.pending is not None, "the launch waiter gave up"
+
+    # ...and the retry works once the list can be read again.
+    ops.windows = [win(11, appeared=clk.t + 1.0)]
+    ops.list_windows = lambda: list(ops.windows)
+    d.on_client_list_changed()
+    assert ("activate", 11, 20) in ops.calls
+    assert d.launcher.pending is None
+
+
+def test_arm_assign_with_an_unreadable_window_list_says_so_and_does_not_arm():
+    """"not manageable" would be the wrong diagnosis: the window is fine, the
+    read failed. Binding on a guess would write the wrong class to the config."""
+    notes = Notes()
+    ops = FakeOps(windows=[win(5)], active=5)
+    ops.list_windows = lambda: None
+    d = daemon(ops, notifier=notes)
+
+    d.arm_assign()
+
+    assert d.assign.armed is False
+    assert notes.mentions("could not read")
+    assert not notes.mentions("not manageable")
+
+
 # ---- focus-loss hiding --------------------------------------------------
 
 def test_hide_dial_hides_when_another_window_takes_focus():

@@ -271,7 +271,7 @@ def test_wm_class_is_the_class_field_not_the_instance():
     assert listed[0].wm_class != "instance"
 
 
-def test_an_unreadable_client_list_is_not_reported_as_no_windows():
+def test_an_unreadable_client_list_is_reported_as_none_not_as_no_windows():
     """`None` from the property read must not collapse into an empty list.
 
     Two things break if it does: the pruning loop deletes EVERY _first_seen
@@ -280,6 +280,9 @@ def test_an_unreadable_client_list_is_not_reported_as_no_windows():
     for a RUNNING app decides to LAUNCH and a second instance appears.
     _NET_CLIENT_LIST is genuinely unset for a moment across a
     `gnome-shell --replace`, so this is not a hypothetical.
+
+    Protecting only the pruning was not enough: the CALLERS need the unknown
+    state to be expressible, which is why this returns None rather than [].
     """
     WID = 0x500005
     o, d = ops()
@@ -298,7 +301,9 @@ def test_an_unreadable_client_list_is_not_reported_as_no_windows():
         raise RuntimeError("x server hiccup")
 
     root_win.get_full_property = boom
-    assert o.list_windows() == []
+    unknown = o.list_windows()
+    assert unknown is None, "unknown must be expressible, not collapsed to empty"
+    assert unknown != [], "an empty list makes every Dial look unlaunched"
     assert o._first_seen.get(WID) == first, \
         "an unreadable client list wiped a live window's appeared time"
 

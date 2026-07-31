@@ -128,7 +128,10 @@ def run(config: Config) -> int:
         from dials.windows import WindowOps
         d = display.Display()
         ops = WindowOps(d, d.screen().root)
-        windows = [w for w in ops.list_windows() if w.wm_class]
+        listed = ops.list_windows()
+        if listed is None:
+            return None          # unreadable client list: cancel, do not bind
+        windows = [w for w in listed if w.wm_class]
         if not windows:
             return None
         index = 0

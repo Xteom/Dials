@@ -167,17 +167,24 @@ class WindowOps:
 
     # ---- reads -----------------------------------------------------------
 
-    def list_windows(self) -> list["WindowInfo"]:
-        """Every WM-managed window, with the fields the policy needs."""
+    def list_windows(self) -> list["WindowInfo"] | None:
+        """Every WM-managed window, or **None** when the list is UNREADABLE.
+
+        `None` is not an empty list and no caller may conflate the two. An empty
+        list makes every Dial look unlaunched, so a keypress takes the LAUNCH
+        branch for an app that is in fact running and confirming it starts a
+        SECOND instance. Returning `[]` here is what made that reachable through
+        nothing worse than a transient X error, and _NET_CLIENT_LIST is
+        genuinely unset for a moment across a `gnome-shell --replace`.
+
+        Callers treat `None` as "do nothing this event"; the pruning below is
+        skipped too, so a window's `appeared` time - which choose(since=) relies
+        on as identity, not liveness - survives the gap.
+        """
         raw = self._prop(self.root.id, "_NET_CLIENT_LIST")
         if raw is None:
-            # Read failed, or the WM has not published the property yet (it is
-            # briefly unset across a `gnome-shell --replace`). "Unknown" must
-            # not be reported as "empty": pruning here would reset every
-            # window's appeared time, and an empty list makes every Dial look
-            # unlaunched, so a keypress would offer to launch a running app.
-            log.warning("could not read _NET_CLIENT_LIST; treating as unknown")
-            return []
+            log.warning("could not read _NET_CLIENT_LIST; reporting unknown")
+            return None
         ids = raw
         now = time.monotonic()
         out: list[WindowInfo] = []

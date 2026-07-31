@@ -158,6 +158,15 @@ class Daemon:
 
         try:
             windows = self.ops.list_windows()
+            if windows is None:
+                # UNKNOWN, not "no windows". Skipping the press loses one
+                # keypress; treating unknown as empty makes a running app look
+                # unlaunched, takes the LAUNCH branch, and a confirm then starts a
+                # SECOND instance of it. One dropped press is the cheaper failure
+                # by a wide margin, and it is logged so it is not a mystery.
+                log.warning("window list unreadable; ignoring the press on "
+                            "slot %r", slot)
+                return None
             active = self.ops.active_window()
             chosen = choose(windows, dial.match_class,
                             active_id=active, recent=self.recent)
@@ -269,7 +278,13 @@ class Daemon:
             if not active:
                 self._notify("Assign mode", "no active window to bind")
                 return
-            windows = {w.wid: w for w in self.ops.list_windows()}
+            listed = self.ops.list_windows()
+            if listed is None:
+                # Unknown, not empty: guessing empty would report the window as
+                # "not manageable", which is a different and wrong diagnosis.
+                self._notify("Assign mode", "could not read the window list")
+                return
+            windows = {w.wid: w for w in listed}
             info = windows.get(active)
             if info is None:
                 self._notify("Assign mode", "active window is not manageable")
@@ -317,6 +332,15 @@ class Daemon:
         except Exception:
             return
 
+        if windows is None:
+            # Unknown, not empty. Reconciling against a guessed-empty list would
+            # make every tracked window look gone, and adopting a pending launch
+            # from it is meaningless. Deliberately a COMPLETE no-op, `recent`
+            # included: one skipped MRU update costs nothing, whereas half-acting
+            # on an unknown state is how the LAUNCH-a-running-app bug happened.
+            log.debug("window list unreadable on focus change; skipping")
+            return
+
         if active:
             self.recent = (active,) + tuple(w for w in self.recent if w != active)[:7]
 
@@ -347,6 +371,11 @@ class Daemon:
         except Exception:
             log.debug("could not list windows on client-list change",
                       exc_info=True)
+            return
+        if windows is None:
+            # Unknown, not empty: there is nothing to adopt FROM, and the pending
+            # launch stays armed so the next event retries inside its 10s deadline.
+            log.debug("window list unreadable on client-list change; skipping")
             return
         self._adopt_pending_launch(windows)
 

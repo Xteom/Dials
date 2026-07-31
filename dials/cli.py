@@ -177,8 +177,13 @@ def _cmd_capture(args, d: Deps) -> int:
     from dials.geometry import Rect
     from dials.windows import choose
 
-    chosen = choose(d.list_windows(), dial.match_class,
-                    active_id=d.active_window())
+    windows = d.list_windows()
+    if windows is None:
+        # Unknown, not empty: "no window matching class" would be a lie, and
+        # capture writes to the config, so guessing has a persistent cost.
+        print("could not read the window list from X", file=d.out)
+        return 1
+    chosen = choose(windows, dial.match_class, active_id=d.active_window())
     if chosen is None:
         print(f"no window matching class {dial.match_class!r}", file=d.out)
         return 1

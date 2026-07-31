@@ -123,6 +123,18 @@ def test_capture_reports_no_matching_window():
     assert "no window" in out.getvalue().lower()
 
 
+def test_capture_distinguishes_an_unreadable_window_list_from_no_match():
+    """`None` means "could not read", and capture WRITES the config, so guessing
+    "no window matching class" both lies and risks a persistent wrong rect."""
+    d, state, out = deps({"9": dial()}, windows=(), active=None)
+    d.list_windows = lambda: None
+    assert main(["capture", "9"], deps=d) == 1
+    assert state["upserts"] == 0
+    text = out.getvalue().lower()
+    assert "could not read" in text
+    assert "no window matching" not in text
+
+
 def test_capture_rejects_an_unbound_slot():
     d, state, _ = deps({})
     assert main(["capture", "9"], deps=d) == 2
