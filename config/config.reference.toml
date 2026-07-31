@@ -49,9 +49,11 @@ rect          = [0.5, 0.0, 0.5, 1.0]
 on_focus_loss = "normal"
 
 
-# LEFT half of the ultrawide: 50% wide, full height. Moved here when Spotify took
-# the right half - two Dials at the identical rect would sit exactly on top of
-# each other, which is legal but not useful.
+# RIGHT half of the ultrawide: 50% wide, full height - the SAME rect as the
+# Spotify Dial, deliberately. Two Dials sharing one screen region is a supported
+# pattern, not a mistake: 9 puts Spotify there, 5 puts Slack there, and only one
+# is up at a time. Nothing special-cases a Dial appearing over another, because
+# showing one is an ordinary focus change.
 [dials."5"]
 label         = "Slack"
 # Slack's WM_CLASS is ("slack", "Slack"); the class field is what is matched.
@@ -63,7 +65,7 @@ launch        = "flatpak run com.slack.Slack"
 # ("Slack" -> "slack" -> the Slack glyph), so hardcoding it here would just be a
 # second place to keep in sync.
 monitor       = "HDMI-0"
-rect          = [0.0, 0.0, 0.5, 1.0]
+rect          = [0.5, 0.0, 0.5, 1.0]
 on_focus_loss = "hide"
 
 
