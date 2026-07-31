@@ -516,8 +516,7 @@ def _install_confirm_grabs(launcher, factory, notifier=None):
     if failures:
         # Only `Return` is asked for now, so a failure here is real: another
         # client holds Return on that modifier combination. Reported rather than
-        # discarded because the spec requires "keep the successful grab, report
-        # the other" - without this an operator cannot tell why Enter did not
+        # discarded because otherwise an operator cannot tell why Enter did not
         # work. (The old version logged keycode 104 as an EXPECTED failure here.
         # That could never fire: the duplicate grab succeeded.)
         log.warning(

@@ -730,11 +730,21 @@ An unbound-but-configured app is not launched on the first press, so a stray key
 anything. Instead: notify *"Spotify not running — press Enter to launch"* and arm for 5 s. Either
 main `Return` (keycode 36) or `KP_Enter` confirms.
 
-While armed, `Return` and `KP_Enter` are grabbed over the **same tolerated lock-mask set as the Dial
-keys** — `{0, LockMask}` — and ungrabbed immediately on the first press or at timeout. Using mask 0
-alone here would reintroduce the probe `07` bug in miniature: confirmation would silently stop working
-whenever CapsLock happened to be on. Modified Enter is still never touched, since `Mod2Mask`,
+While armed, **only `Return`** is temporarily grabbed, over the **same tolerated lock-mask set as the
+Dial keys** — `{0, LockMask}` — and ungrabbed immediately on the first press or at timeout. Using mask
+0 alone here would reintroduce the probe `07` bug in miniature: confirmation would silently stop
+working whenever CapsLock happened to be on. Modified Enter is still never touched, since `Mod2Mask`,
 `ControlMask` and `ShiftMask` are excluded, so `Shift+Enter` and `Ctrl+Enter` pass through untouched.
+
+`KP_Enter` is deliberately **not** grabbed here. It is already permanently grabbed as Dial slot
+`enter`, so the daemon receives it regardless and the dispatcher routes it. An earlier draft of this
+section grabbed both, on the false premise that X returns `BadAccess` for a duplicate grab and that the
+temporary grab would therefore be a harmless no-op. Probe `09` measured the opposite: a duplicate
+passive grab from the **same client** succeeds silently and is not reference counted, so `KP_Enter`
+entered the temporary grab set and the first release deleted the *permanent* grab — killing the `enter`
+Dial until the next pause/resume or restart. `BadAccess` is a cross-client condition only. "What
+confirms a launch" and "what needs a temporary grab" are therefore separate sets in the code
+(`confirm_keycodes()` vs `grab_keycodes()`) and must stay separate.
 
 `Return` must be `BadAccess`-checked at grab time like every other key, since it is far more likely to
 be contended than the numpad keys. See *Confirmation edge cases* below for what happens when one or
@@ -761,8 +771,8 @@ These were undefined in an earlier draft and are now specified, because a tempor
 
 | Case | Behavior |
 | --- | --- |
-| Either `Return` or `KP_Enter` grab fails | arm with whichever succeeded; if **both** fail, refuse to arm and notify — never leave a confirmation pending with no way to confirm it |
-| One grab succeeds, the other fails | roll back to a consistent state: keep the successful grab, report the other in `status` |
+| The `Return` grab fails on every mask | refuse to arm and notify — never leave a confirmation pending with no way to confirm it. Conservative rather than exact: `KP_Enter` is permanently grabbed, so such a launch *could* still have been confirmed from the numpad. Preferred over the alternative, which is arming while telling the user "press Enter" when the key they are most likely to reach for is contended |
+| The `Return` grab fails on some masks but not others | arm anyway; confirmation works in the lock states that succeeded, and the failure is reported |
 | A second missing-app Dial is pressed while armed | the newer request **replaces** the older one; there is only ever one pending confirmation, so Enter is never ambiguous |
 | The originating Dial key is pressed again while armed | treated as confirmation, so the "press it twice" instinct also works |
 | Daemon exits, is paused, or reloads while armed | both temporary grabs are released in a `finally`-equivalent path; grabs are process-scoped so a *crash* releases them with the X connection, but an orderly stop must not rely on that |
