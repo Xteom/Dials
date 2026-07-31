@@ -203,6 +203,40 @@ pin_geometry = true
     assert any(c[0] == "geometry" for c in ops.calls)
 
 
+def test_hints_are_applied_on_a_plain_raise_not_only_on_show():
+    """A window that is already visible must still be made a panel.
+
+    This is the alt-tab regression. Such a window never goes through SHOW - the
+    daemon only ever RAISEs it - so gating apply_hints on SHOW meant it was
+    never made sticky and never left the taskbar and switcher. Asserted here at
+    the call site and not only on `panels.reapply_hints`, because reverting the
+    daemon to `if action == panels.SHOW:` left the whole suite green.
+    """
+    ops = FakeOps(windows=[win(5)], active=999)          # visible, not active
+    assert daemon(ops).handle_slot("9", timestamp=1) == RAISE
+    assert ("hints", 5, False) in ops.calls
+
+
+def test_hints_are_applied_on_a_raise_regardless_of_pin_geometry():
+    """pin_geometry governs position only; it must not gate window properties."""
+    cfg = loads("""
+[dials."9"]
+match_class = "spotify"
+pin_geometry = false
+""")
+    ops = FakeOps(windows=[win(5)], active=999)
+    daemon(ops, config=cfg).handle_slot("9", timestamp=1)
+    assert any(c[0] == "hints" for c in ops.calls)
+    assert not any(c[0] == "geometry" for c in ops.calls)
+
+
+def test_hide_does_not_apply_hints():
+    """Nothing to assert on a window that is about to be iconified."""
+    ops = FakeOps(windows=[win(5)], active=5)
+    assert daemon(ops).handle_slot("9", timestamp=1) == HIDE
+    assert not any(c[0] == "hints" for c in ops.calls)
+
+
 def test_active_window_is_iconified():
     ops = FakeOps(windows=[win(5)], active=5)
     d = daemon(ops)

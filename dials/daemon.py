@@ -191,7 +191,7 @@ class Daemon:
 
             if panels.reapply_geometry(action, dial.pin_geometry):
                 self.ops.apply_geometry(chosen.wid, self._rect_for(dial))
-            if action == panels.SHOW:
+            if panels.reapply_hints(action):
                 self.ops.apply_hints(chosen.wid,
                                      above=(dial.on_focus_loss == "above"))
             self._tracker(dial).activating(chosen.wid)

@@ -42,6 +42,23 @@ def reapply_geometry(action: str, pin_geometry: bool) -> bool:
     return False
 
 
+def reapply_hints(action: str) -> bool:
+    """Whether this action should re-assert the Dial's window hints.
+
+    SHOW *and* RAISE - and deliberately NOT gated on `pin_geometry`, which is
+    about position, not about window properties.
+
+    The hints are what keep a Dial sticky across workspaces and out of the
+    taskbar and switcher. A window that was already visible the first time the
+    daemon saw it never goes through SHOW: every press on it is a RAISE, or a
+    HIDE. Gating hints on SHOW therefore meant such a window never received them
+    at all, so it stayed in the switcher and on a single workspace forever -
+    which is exactly what was reported for the Firefox Dial. They are idempotent
+    client messages, a handful per press, and never run at idle.
+    """
+    return action in (SHOW, RAISE)
+
+
 import time as _time
 
 INACTIVE = "inactive"
