@@ -30,7 +30,7 @@ on_focus_loss = "hide"
 pin_geometry  = true
 
 
-# Left half of the ultrawide: 50% wide, full height.
+# RIGHT half of the ultrawide: 50% wide, full height.
 [dials."9"]
 label         = "Spotify"
 # CAPITAL S. This matches the *class* field of WM_CLASS, and Spotify's is
@@ -43,13 +43,15 @@ match_class   = "Spotify"
 launch        = "/snap/bin/spotify --force-device-scale-factor=0.7"
 icon          = ""
 monitor       = "HDMI-0"
-rect          = [0.0, 0.0, 0.5, 1.0]
-on_focus_loss = "hide"
+rect          = [0.5, 0.0, 0.5, 1.0]
+# "normal", not "hide": clicking away from Spotify must not put it away. Still
+# buriable, so another window can cover it and pressing 9 surfaces it again.
+on_focus_loss = "normal"
 
 
-# Right half of the ultrawide: 50% wide, full height. Overlaps the Firefox Dial
-# below, which is fine - a Dial appearing over another is an ordinary focus
-# change, so nothing special-cases it.
+# LEFT half of the ultrawide: 50% wide, full height. Moved here when Spotify took
+# the right half - two Dials at the identical rect would sit exactly on top of
+# each other, which is legal but not useful.
 [dials."5"]
 label         = "Slack"
 # Slack's WM_CLASS is ("slack", "Slack"); the class field is what is matched.
@@ -61,11 +63,13 @@ launch        = "flatpak run com.slack.Slack"
 # ("Slack" -> "slack" -> the Slack glyph), so hardcoding it here would just be a
 # second place to keep in sync.
 monitor       = "HDMI-0"
-rect          = [0.5, 0.0, 0.5, 1.0]
+rect          = [0.0, 0.0, 0.5, 1.0]
 on_focus_loss = "hide"
 
 
-# Right-hand 30% of the ultrawide, full height.
+# Right-hand 30% of the ultrawide, full height. Overlaps the right end of the
+# Spotify Dial on purpose - a Dial appearing over another is an ordinary focus
+# change, and nothing special-cases it.
 [dials."6"]
 label         = "Firefox (dial6)"
 # Must stay in sync with --class in `launch` below - the class is what identifies
@@ -81,5 +85,6 @@ monitor       = "HDMI-0"
 # x = 0.7 so the 30% sits flush with the right edge (0.7 + 0.3 = 1.0). Fractions
 # must sum to at most 1.0 or the Dial would be placed off-monitor.
 rect          = [0.7, 0.0, 0.3, 1.0]
-# Stays up when focus moves elsewhere, and is never buried.
-on_focus_loss = "above"
+# "normal": stays put when focus moves elsewhere AND can be buried. It was
+# "above", which is what kept it permanently on top of everything.
+on_focus_loss = "normal"
