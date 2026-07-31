@@ -1031,6 +1031,75 @@ restores stock numpad behavior with NumLock off; nothing persists past process e
 Firefox panel profile, if created, is removed with `firefox -P` or by deleting its profile
 directory.
 
+## Pop Shell interaction
+
+**`_NET_WM_STATE_SKIP_TASKBAR` is necessary but not sufficient on this desktop.** Dial windows kept
+appearing in alt-tab and in the workspace overview despite carrying it. The cause is not the hint,
+and not when the hint is set — it is `pop-shell@system76.com`, which is enabled here.
+
+GNOME Shell 42.9 itself honours the hint in both places, read from its own sources:
+
+```js
+workspace.js:1376   _isOverviewWindow(window) { return !window.skip_taskbar; }
+altTab.js:53        .filter((w, i, a) => !w.skip_taskbar && a.indexOf(w) == i);
+```
+
+Alt-tab rebuilds that list every time the switcher opens, so a "the hint was set too late" theory
+does not survive contact with the source — it was checked and discarded.
+
+Pop Shell then **monkey-patches both**, to keep minimise-to-tray applications reachable:
+
+```js
+Workspace.prototype._isOverviewWindow = function (win) {
+    return (is_valid_minimize_to_tray(meta_win, ext) || default_isoverviewwindow_ws(win));
+};
+WindowSwitcherPopup.prototype._getWindowList = /* likewise */
+```
+
+`is_valid_minimize_to_tray` returns true for any non-override-redirect NORMAL or UTILITY window that
+has `skip_taskbar`, a non-null `WM_CLASS`, and is not `Gjs`/`Gnome-shell` — which describes every
+Dial window exactly. So the hint that is supposed to hide a Dial is the very thing that makes Pop
+Shell show it.
+
+**This also explains Guake.** Guake has identical window properties to a Dial and stays out of
+alt-tab, which looked like evidence for the timing theory. It is nothing of the sort: Pop Shell ships
+a hardcoded allowlist and Guake is on it —
+
+```js
+var SKIPTASKBAR_EXCEPTIONS = [
+    { class: "Conky" }, { class: "gjs" }, { class: "Guake" },
+    { class: "Com.github.amezin.ddterm" }, { class: "plank" },
+];
+```
+
+### The fix
+
+`is_valid_minimize_to_tray` consults `cfg.skiptaskbar_shall_hide(meta_win)`, which matches the
+window's class and title against the user's own rules in `~/.config/pop-shell/config.json`, using the
+same shape as that allowlist. Adding one rule per Dial class restores the intended behaviour:
+
+```json
+"skiptaskbarhidden": [
+  { "class": "^Dial6$" }, { "class": "^Spotify$" }, { "class": "^Slack$" }
+]
+```
+
+Anchored so a class name cannot match a longer one; Pop Shell applies the pattern case-insensitively.
+The rule is only ever consulted for windows that already have `skip_taskbar`, so an ordinary Spotify
+window that is not acting as a Dial is unaffected.
+
+Preferred over `gsettings set org.gnome.shell.extensions.pop-shell show-skip-taskbar false`, which
+would disable the feature for every application — including genuine tray-minimised ones, which is
+the case it exists to serve.
+
+Pop Shell reads this file at startup and does not watch it, so a Shell reload is required: on X11,
+Alt+F2 then `r`. `install.sh` checks for the rules and prints instructions, but deliberately does not
+edit the file: it belongs to another extension, and a malformed `config.json` would take Pop Shell's
+tiling down with it.
+
+Anything that adds a Dial for a new application needs a matching rule here. That coupling is the
+cost of this approach and is why it is written down rather than left in a commit message.
+
 ## Deferred
 
 - **Runtime diagnostics in `dials status`** — grab conflicts, monitor fallbacks and geometry
@@ -1051,16 +1120,8 @@ directory.
 - **Real bitmap app icons** in the TUI via the Kitty graphics protocol.
 - **Alt-tab-hidden but taskbar-visible** — impossible with EWMH hints alone, since mutter reads one
   flag for both. Would need a GNOME Shell extension.
-- **Alt-tab exclusion is not yet confirmed working on this desktop.** A Dial window was reported
-  still appearing in the switcher while already carrying `_NET_WM_STATE_SKIP_TASKBAR`,
-  `SKIP_PAGER` and `STICKY`. Guake, with the *identical* set of properties, stays out. The one
-  difference is timing: Guake sets the hints before its window is mapped, and Dials can only set
-  them afterwards, on a foreign window it does not own — so the suspicion is that GNOME Shell
-  registers the window before it sees the hint and does not re-evaluate. Two things were fixed on
-  the way to this conclusion (hints are now applied on RAISE, not only on SHOW; ABOVE is now
-  explicitly removed), and neither is confirmed to resolve the switcher symptom. If it persists,
-  the next step is not more hint-setting — it is establishing what GNOME Shell's switcher actually
-  filters on, on this exact Shell version, before changing anything else.
+- **Alt-tab and overview exclusion needs a Pop Shell config entry, not just EWMH hints.** Solved;
+  see *Pop Shell interaction* below. `SKIP_TASKBAR` is necessary and not sufficient on this desktop.
 - **Event-driven NumLock tracking** — needs an XKB binding python-xlib does not provide; revisit if
   the 1 Hz tray timer ever proves visible, or if `ctypes` becomes acceptable.
 - **Wayland / COSMIC support** — would mean moving key handling to `keyd` at the evdev layer and

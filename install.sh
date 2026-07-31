@@ -86,6 +86,41 @@ else
   echo "  tray NOT enabled (re-run with --tray to enable it)"
 fi
 
+echo "==> checking Pop Shell's skip-taskbar rules"
+# Advisory only, never fatal, and it deliberately does NOT edit the file.
+#
+# _NET_WM_STATE_SKIP_TASKBAR is necessary but not sufficient on this desktop.
+# GNOME Shell honours it in both the overview and alt-tab, but pop-shell
+# monkey-patches both to keep minimise-to-tray apps reachable, and its predicate
+# matches any NORMAL window with skip_taskbar and a real WM_CLASS - i.e. every
+# Dial window. Its own config can exempt classes again. See the design doc's
+# "Pop Shell interaction" section.
+#
+# Not edited automatically because config.json belongs to another extension and
+# malformed JSON there would take pop-shell's tiling down with it.
+POP_CONF="${XDG_CONFIG_HOME:-$HOME/.config}/pop-shell/config.json"
+if gnome-extensions list --enabled 2>/dev/null | grep -q "pop-shell@system76.com"; then
+  missing=""
+  for cls in $("$VENV/bin/python" - <<'PY'
+from dials.config import load
+print("\n".join(sorted({d.match_class for d in load().dials.values() if d.match_class})))
+PY
+  ); do
+    grep -q "$cls" "$POP_CONF" 2>/dev/null || missing="$missing $cls"
+  done
+  if [ -n "$missing" ]; then
+    echo "  NOTE: pop-shell is enabled and will show these Dials in alt-tab and the"
+    echo "        overview despite SKIP_TASKBAR:$missing"
+    echo "        Add one rule per class to \"skiptaskbarhidden\" in"
+    echo "        $POP_CONF, e.g. { \"class\": \"^Spotify\$\" }, then reload"
+    echo "        GNOME Shell (X11: Alt+F2, then r). Details: docs/superpowers/specs/."
+  else
+    echo "  all Dial classes are already exempted"
+  fi
+else
+  echo "  pop-shell not enabled; nothing to do"
+fi
+
 echo "==> status"
 systemctl --user --no-pager --lines=0 status dialsd.service || true
 "$VENV/bin/dials" list

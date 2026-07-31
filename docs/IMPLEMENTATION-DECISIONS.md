@@ -642,7 +642,51 @@ pattern, not a collision: one screen region, two keys, one window up at a time.
 Nothing special-cases a Dial appearing over another, because showing one is an
 ordinary focus change — which is why this needed no code at all.
 
-### 8.7 Known rough edge: an app that minimises to the tray reads as "not running"
+### 8.7 The alt-tab and overview problem was never ours
+
+Two rounds of hint fixes went into making Dial windows disappear from alt-tab and
+from the workspace overview, and neither was the cause. Reading GNOME Shell 42.9's
+own extracted sources settled it in minutes, after a day of theorising:
+
+```js
+workspace.js:1376   _isOverviewWindow(window) { return !window.skip_taskbar; }
+altTab.js:53        .filter((w, i, a) => !w.skip_taskbar && a.indexOf(w) == i);
+```
+
+Shell honours the hint in both places, and alt-tab rebuilds its list on every open
+— so the "hint was applied too late to be noticed" theory, which was mine and
+which I had already written into the spec as the likely answer, was simply wrong.
+
+`pop-shell` monkey-patches both functions so that minimise-to-tray applications
+stay reachable, and its `is_valid_minimize_to_tray` predicate matches *any*
+non-override-redirect NORMAL window with `skip_taskbar` and a real `WM_CLASS`.
+That is a precise description of a Dial window. **The hint meant to hide a Dial is
+what made Pop Shell show it.**
+
+And Guake — whose identical properties had looked like the strongest evidence for
+the timing theory — is simply on Pop Shell's hardcoded `SKIPTASKBAR_EXCEPTIONS`
+allowlist, alongside Conky and plank.
+
+**Decision.** Three rules in `~/.config/pop-shell/config.json`'s
+`skiptaskbarhidden`, one per Dial class, anchored. Chosen over the global
+`show-skip-taskbar` gsettings toggle, which would break the feature for every
+genuine tray application.
+
+**Implication, and it is a real cost.** Dials now has a dependency on a *third
+party extension's config file* for one of its stated behaviours, and adding a Dial
+for a new application needs a matching rule there. `install.sh` checks and prints
+instructions but does not edit the file — it belongs to another extension, and
+malformed JSON would take Pop Shell's tiling down with it.
+
+**Implication, method.** Two speculative fixes shipped before anyone read the 60
+lines of JavaScript that decide the behaviour. Both fixes were independently
+correct and worth keeping, which is what made the guessing feel productive. When
+the question is "why does this desktop do X", the desktop's source is on disk:
+`gresource extract` on `libgnome-shell.so` and the extensions in
+`/usr/share/gnome-shell/extensions/` are readable and authoritative. Read them
+first.
+
+### 8.8 Known rough edge: an app that minimises to the tray reads as "not running"
 
 Flatpak Slack unmaps its window and drops out of `_NET_CLIENT_LIST` when it
 minimises to the system tray. `list_windows()` correctly does not see it, so the

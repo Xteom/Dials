@@ -137,6 +137,28 @@ Firefox, or the monitor layout changes.
 this and what each one implies; `docs/RETROSPECTIVE.md` records the process
 failures worth not repeating.
 
+## If Dials show up in alt-tab or the workspace overview
+
+`_NET_WM_STATE_SKIP_TASKBAR` is necessary but **not sufficient** on Pop!_OS.
+GNOME Shell honours it in both places, but `pop-shell` monkey-patches the overview
+and the switcher so minimise-to-tray applications stay reachable — and its test
+matches every Dial window. The hint meant to hide a Dial is what makes Pop Shell
+show it. (Guake escapes only because Pop Shell has it on a hardcoded allowlist.)
+
+Fix: add one rule per Dial class to `~/.config/pop-shell/config.json`, then reload
+GNOME Shell — on X11, Alt+F2 then `r`.
+
+```json
+"skiptaskbarhidden": [
+  { "class": "^Dial6$" }, { "class": "^Spotify$" }, { "class": "^Slack$" }
+]
+```
+
+`install.sh` checks this and prints what is missing, but never edits the file: it
+belongs to another extension, and malformed JSON there breaks Pop Shell's tiling.
+**Adding a Dial for a new application means adding a rule here too.** The full
+reasoning is in the design doc's *Pop Shell interaction* section.
+
 ## The Firefox Dial
 
 Slot 6 runs its own Firefox profile, which is tuned differently from the main one
