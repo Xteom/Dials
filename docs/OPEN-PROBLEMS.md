@@ -21,29 +21,53 @@ Kept here rather than deleted because the reasoning matters: the requirement was
 "always in all workspaces", sticky implemented it literally, and that was the
 wrong reading — "reachable from any workspace" was the actual wish.
 
-## 2. Whether the Pop Shell rules actually fix alt-tab and the overview
+## 2. Pop Shell's documented per-class rules are dead code — upstream bug
 
-**Status: cause established, fix applied, effect unverified.**
+**Status: root cause found, working switch applied, effect awaiting one look.**
 
 `SKIP_TASKBAR` is necessary but not sufficient here; `pop-shell` deliberately shows
-skip-taskbar windows and has to be told not to. The full mechanism, with source
-excerpts, is in the design doc's *Pop Shell interaction* section, and the three
-`skiptaskbarhidden` rules are in `~/.config/pop-shell/config.json`.
+skip-taskbar windows. Full mechanism with source excerpts: the design doc's *Pop
+Shell interaction* section.
 
-What is confirmed: the rules match. Pop Shell's `skiptaskbar_shall_hide()` was
-replicated against the live windows and returns "hide" for `Spotify`, `Dial6` and
-`Slack`, with Guake as a control (it matches Pop Shell's own built-in rule and is
-known to stay out of alt-tab on this machine).
+**The `skiptaskbarhidden` rules Pop Shell documents can never work in this
+version.** `ext.conf` starts as `new Config.Config()`, whose constructor sets
+`skiptaskbarhidden = []`, and `Config.reload()` — the only thing that ever
+repopulates it — copies out `float` and `log_on_focus` and drops the third field:
 
-What is not confirmed: that alt-tab and the overview are now clean. The one report
-after applying them turned out to be about §1 instead, so the switcher and window
-picker have still not actually been looked at since the config was loaded.
+```js
+this.float = c.float;
+this.log_on_focus = c.log_on_focus;     // skiptaskbarhidden never assigned
+```
 
-**Next step:** open alt-tab, and open the window-picker overview, and look. If a
-Dial is still listed, do not add more hints — establish which code path builds that
-particular list first. `cosmic-workspaces` overrides `Workspace.Workspace.prototype`
-but only replaces `_init`, so `_isOverviewWindow` still resolves to Pop Shell's
-patched copy; that was checked, but only by reading, not by observation.
+The JSON is parsed in full and then two of its three fields are used. So
+`skiptaskbar_shall_hide()` only ever consults the hardcoded `SKIPTASKBAR_EXCEPTIONS`
+— which is the real reason Guake escapes and nothing user-configured can.
+
+**Applied instead:** `gsettings set org.gnome.shell.extensions.pop-shell
+show-skip-taskbar false`. Supported, user-level, reversible, and Pop Shell watches
+the key so it took effect immediately. Trade: system-wide, so genuine
+tray-minimising apps lose their overview/alt-tab entry too.
+
+The three inert `skiptaskbarhidden` rules are left in `config.json`. They cost
+nothing and become correct if the bug is fixed — recorded here so their presence is
+never read as evidence they do something.
+
+**Still to do:** actually look at alt-tab and the overview since the gsettings
+change. Two rounds of "still showing" have already been spent on symptoms that
+turned out to be other things (§1, and then this).
+
+**Not reported upstream.** Worth doing; nobody has.
+
+### The method failure worth keeping
+
+The rules were written, then *verified to match* by replicating
+`skiptaskbar_shall_hide()` in Python against the live windows — Guake included as a
+control — and they still did nothing. **Verifying that a rule matches is not
+verifying that the rule is consulted.** The replication faithfully reproduced the
+predicate and shared its input assumption: that `this.skiptaskbarhidden` contains
+what the file contains. Reading the two lines of `reload()` would have settled it in
+seconds, and `reload()` had already been read in this session for a different
+question without noticing what it omitted.
 
 ## 3. `Alt+F2` then `r` cannot reload GNOME Shell on this install
 

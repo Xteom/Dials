@@ -86,41 +86,32 @@ else
   echo "  tray NOT enabled (re-run with --tray to enable it)"
 fi
 
-echo "==> checking Pop Shell's skip-taskbar rules"
-# Advisory only, never fatal, and it deliberately does NOT edit the file.
+echo "==> checking Pop Shell's skip-taskbar override"
+# Advisory only, never fatal, and it changes nothing by itself.
 #
-# _NET_WM_STATE_SKIP_TASKBAR is necessary but not sufficient on this desktop.
-# GNOME Shell honours it in both the overview and alt-tab, but pop-shell
-# monkey-patches both to keep minimise-to-tray apps reachable, and its predicate
-# matches any NORMAL window with skip_taskbar and a real WM_CLASS - i.e. every
-# Dial window. Its own config can exempt classes again. See the design doc's
-# "Pop Shell interaction" section.
+# _NET_WM_STATE_SKIP_TASKBAR is necessary but not sufficient here. GNOME Shell
+# honours it in both the overview and alt-tab, but pop-shell monkey-patches both
+# to keep minimise-to-tray apps reachable, and its predicate matches any NORMAL
+# window with skip_taskbar and a real WM_CLASS - i.e. every Dial window.
 #
-# Not edited automatically because config.json belongs to another extension and
-# malformed JSON there would take pop-shell's tiling down with it.
-POP_CONF="${XDG_CONFIG_HOME:-$HOME/.config}/pop-shell/config.json"
+# The per-class `skiptaskbarhidden` rules pop-shell documents CANNOT exempt them:
+# its Config.reload() copies out `float` and `log_on_focus` and silently drops
+# `skiptaskbarhidden`, so that list is permanently empty and only the hardcoded
+# SKIPTASKBAR_EXCEPTIONS ever apply. That is an upstream bug - do NOT send anyone
+# to edit config.json, which is what an earlier version of this check did. The
+# gsettings key below is the switch that works, and pop-shell watches it, so it
+# takes effect with no reload. See the design doc's "Pop Shell interaction".
 if gnome-extensions list --enabled 2>/dev/null | grep -q "pop-shell@system76.com"; then
-  missing=""
-  for cls in $("$VENV/bin/python" - <<'PY'
-from dials.config import load
-print("\n".join(sorted({d.match_class for d in load().dials.values() if d.match_class})))
-PY
-  ); do
-    grep -q "$cls" "$POP_CONF" 2>/dev/null || missing="$missing $cls"
-  done
-  if [ -n "$missing" ]; then
-    echo "  NOTE: pop-shell is enabled and will show these Dials in alt-tab and the"
-    echo "        overview despite SKIP_TASKBAR:$missing"
-    echo "        Add one rule per class to \"skiptaskbarhidden\" in"
-    echo "        $POP_CONF, e.g. { \"class\": \"^Spotify\$\" }, then reload"
-    echo "        pop-shell so it re-reads that file (it does not watch it):"
-    echo "          gnome-extensions disable pop-shell@system76.com \\"
-    echo "            && gnome-extensions enable pop-shell@system76.com"
-    echo "        NOT Alt+F2 then r - that needs /usr/libexec/mutter-restart-helper,"
-    echo "        which this Pop!_OS install does not ship, and it fails silently."
-    echo "        Details: docs/superpowers/specs/, \"Pop Shell interaction\"."
+  if [ "$(gsettings get org.gnome.shell.extensions.pop-shell show-skip-taskbar 2>/dev/null)" = "true" ]; then
+    echo "  NOTE: pop-shell is enabled with show-skip-taskbar=true, so it will show"
+    echo "        your Dials in alt-tab and the workspace overview even though they"
+    echo "        set SKIP_TASKBAR. To stop that:"
+    echo "          gsettings set org.gnome.shell.extensions.pop-shell \\"
+    echo "            show-skip-taskbar false"
+    echo "        Applies immediately, no reload. Trade: apps that genuinely"
+    echo "        minimise to the tray are then hidden from those views too."
   else
-    echo "  all Dial classes are already exempted"
+    echo "  show-skip-taskbar is already false; Dials stay out of alt-tab"
   fi
 else
   echo "  pop-shell not enabled; nothing to do"

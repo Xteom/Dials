@@ -1105,40 +1105,70 @@ var SKIPTASKBAR_EXCEPTIONS = [
 ];
 ```
 
+### The per-class rules Pop Shell documents do not work — upstream bug
+
+`is_valid_minimize_to_tray` consults `cfg.skiptaskbar_shall_hide(meta_win)`, which matches the window
+against rules in `~/.config/pop-shell/config.json`'s `skiptaskbarhidden`. That is the obvious,
+targeted hook, and it **cannot work in this version**:
+
+```js
+// config.js
+reload() {
+    const conf = Config.from_config();
+    if (conf.tag === 0) {
+        let c = conf.value;
+        this.float = c.float;
+        this.log_on_focus = c.log_on_focus;     // skiptaskbarhidden is never assigned
+    }
+}
+```
+
+`ext.conf` starts as `new Config.Config()`, whose constructor sets `skiptaskbarhidden = []`, and
+`reload()` is the only thing that ever repopulates it. The JSON *is* parsed — `from_json` returns the
+whole object — and then two of its three fields are copied out and the third is dropped. So
+`this.skiptaskbarhidden` is permanently empty, and `skiptaskbar_shall_hide` only ever consults the
+hardcoded `SKIPTASKBAR_EXCEPTIONS`.
+
+That is also the real reason Guake escapes and nothing user-configured can: not timing, not the
+allowlist being special, but a two-line omission that makes the documented hook dead code.
+
+An earlier revision of this section recommended those rules. They were written, verified to *match*
+by replicating the predicate in Python, and still had no effect — because the predicate they were
+verified against is never given them. Verifying a rule matches is not the same as verifying it is
+consulted.
+
 ### The fix
 
-`is_valid_minimize_to_tray` consults `cfg.skiptaskbar_shall_hide(meta_win)`, which matches the
-window's class and title against the user's own rules in `~/.config/pop-shell/config.json`, using the
-same shape as that allowlist. Adding one rule per Dial class restores the intended behaviour:
-
-```json
-"skiptaskbarhidden": [
-  { "class": "^Dial6$" }, { "class": "^Spotify$" }, { "class": "^Slack$" }
-]
-```
-
-Anchored so a class name cannot match a longer one; Pop Shell applies the pattern case-insensitively.
-The rule is only ever consulted for windows that already have `skip_taskbar`, so an ordinary Spotify
-window that is not acting as a Dial is unaffected.
-
-Preferred over `gsettings set org.gnome.shell.extensions.pop-shell show-skip-taskbar false`, which
-would disable the feature for every application — including genuine tray-minimised ones, which is
-the case it exists to serve.
-
-Pop Shell parses this file only when the extension is enabled — `conf.reload()` runs from its
-constructor and from its own exceptions dialog, and nothing watches the file — so it must be made to
-re-read it:
-
 ```sh
-gnome-extensions disable pop-shell@system76.com && gnome-extensions enable pop-shell@system76.com
+gsettings set org.gnome.shell.extensions.pop-shell show-skip-taskbar false
 ```
 
-**Not `Alt+F2` then `r`.** That is the standard way to reload GNOME Shell on X11 and it **silently
-fails on this machine**: `/usr/libexec/mutter-restart-helper` is not shipped by this Pop!_OS install,
-so mutter logs `Failed to start restart helper` and keeps running the old process. The Shell's PID and
-start time are unchanged by a *successful* re-exec too, so neither is evidence either way — the
-journal line is. This cost a full round trip of "I restarted but it still shows", with a correct fix
-sitting unread on disk the whole time.
+This is the supported switch, it is user-level and reversible, and Pop Shell watches the key
+(`extension.js`, `case 'show-skip-taskbar'`) so it **applies immediately with no reload**. With the
+override uninstalled, stock GNOME behaviour returns and `SKIP_TASKBAR` — which Dials already sets —
+excludes the window from both the switcher and the overview.
+
+**The trade, and it is real:** this disables the feature for *every* application, including genuine
+tray-minimised ones, which is the case it exists to serve. On this machine that appears to cost
+nothing (Slack unmaps its window entirely rather than setting the flag), but it is a system-wide
+setting, not a Dials-scoped one.
+
+The inert `skiptaskbarhidden` rules are left in place: they cost nothing, they express the intent, and
+they become correct the day the upstream bug is fixed. They are recorded as inert in
+`docs/OPEN-PROBLEMS.md` so nobody concludes from their presence that they do something.
+
+### Reloading GNOME Shell on this install
+
+Not needed for the fix above, but needed for anything that *is* read at extension-enable time.
+
+**`Alt+F2` then `r` does not work here.** It is the standard way to reload GNOME Shell on X11 and it
+**fails silently**: `/usr/libexec/mutter-restart-helper` is not shipped by this Pop!_OS install, so
+mutter logs `Failed to start restart helper` and keeps running the old process. A *successful* re-exec
+also preserves the Shell's PID and start time, so neither is evidence either way — the journal line is.
+This cost a full round trip of "I restarted but it still shows".
+
+Use `gnome-extensions disable pop-shell@system76.com && gnome-extensions enable
+pop-shell@system76.com`, or reboot.
 
 `install.sh` checks for the rules and prints instructions, but deliberately does not edit the file: it
 belongs to another extension, and a malformed `config.json` would take Pop Shell's tiling down with

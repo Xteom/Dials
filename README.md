@@ -140,39 +140,37 @@ unconfirmed** — read that before concluding something is broken.
 
 ## If Dials show up in alt-tab or the workspace overview
 
-`_NET_WM_STATE_SKIP_TASKBAR` is necessary but **not sufficient** on Pop!_OS.
-GNOME Shell honours it in both places, but `pop-shell` monkey-patches the overview
-and the switcher so minimise-to-tray applications stay reachable — and its test
-matches every Dial window. The hint meant to hide a Dial is what makes Pop Shell
-show it. (Guake escapes only because Pop Shell has it on a hardcoded allowlist.)
+`_NET_WM_STATE_SKIP_TASKBAR` is necessary but **not sufficient** on Pop!_OS. GNOME
+Shell honours it in both places, but `pop-shell` monkey-patches the overview and the
+switcher so minimise-to-tray applications stay reachable — and its test matches
+every Dial window. The hint meant to hide a Dial is what makes Pop Shell show it.
 
-Fix: add one rule per Dial class to `~/.config/pop-shell/config.json`, then make
-Pop Shell re-read it — it parses that file only when the extension is enabled and
-does not watch it:
+Fix — one command, applies immediately, no reload needed:
 
 ```sh
-gnome-extensions disable pop-shell@system76.com
-gnome-extensions enable  pop-shell@system76.com
+gsettings set org.gnome.shell.extensions.pop-shell show-skip-taskbar false
 ```
 
-**Not Alt+F2 → `r`.** That is the usual advice for reloading GNOME Shell on X11 and
-it *silently fails on this machine*: `/usr/libexec/mutter-restart-helper` is not
-shipped, so mutter logs "Failed to start restart helper" and carries on with the
-old process — leaving you convinced the config was loaded when it was not. Check
-`gnome-extensions info pop-shell@system76.com` if in doubt. The toggle above needs
-no helper binary. It re-initialises Pop Shell's auto-tiler, so if you run with
-`tile-by-default true` your windows may be re-tiled.
+**Do not bother with `skiptaskbarhidden` rules in `~/.config/pop-shell/config.json`.**
+Pop Shell documents them and its own predicate reads them, but `Config.reload()`
+copies out `float` and `log_on_focus` and drops `skiptaskbarhidden` — so that list
+is permanently empty and only Pop Shell's hardcoded exceptions ever apply. That is
+an upstream bug, and it is the real reason Guake escapes while nothing you add can.
+Any rules already there are harmless and become correct if it is ever fixed.
 
-```json
-"skiptaskbarhidden": [
-  { "class": "^Dial6$" }, { "class": "^Spotify$" }, { "class": "^Slack$" }
-]
-```
+The trade: this key is system-wide, so applications that genuinely minimise to the
+tray are hidden from the overview and alt-tab too. That is the feature being
+switched off.
 
-`install.sh` checks this and prints what is missing, but never edits the file: it
-belongs to another extension, and malformed JSON there breaks Pop Shell's tiling.
-**Adding a Dial for a new application means adding a rule here too.** The full
-reasoning is in the design doc's *Pop Shell interaction* section.
+Also worth knowing: **Alt+F2 → `r` does not reload GNOME Shell on this install.**
+`/usr/libexec/mutter-restart-helper` is not shipped, so mutter logs "Failed to start
+restart helper" and keeps running the old process — which looks exactly like a
+config that loaded and did nothing. Not needed for the fix above, but it matters for
+anything read at extension-enable time; use `gnome-extensions disable … && enable …`
+or reboot.
+
+`install.sh` checks the gsettings key and prints the command if it is still `true`.
+Full reasoning: the design doc's *Pop Shell interaction* section.
 
 ## The Firefox Dial
 

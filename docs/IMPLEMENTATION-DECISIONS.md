@@ -667,16 +667,42 @@ And Guake — whose identical properties had looked like the strongest evidence 
 the timing theory — is simply on Pop Shell's hardcoded `SKIPTASKBAR_EXCEPTIONS`
 allowlist, alongside Conky and plank.
 
-**Decision.** Three rules in `~/.config/pop-shell/config.json`'s
-`skiptaskbarhidden`, one per Dial class, anchored. Chosen over the global
-`show-skip-taskbar` gsettings toggle, which would break the feature for every
-genuine tray application.
+**First decision, and it was wrong.** Three rules in
+`~/.config/pop-shell/config.json`'s `skiptaskbarhidden`, one per Dial class,
+preferred over the global `show-skip-taskbar` toggle because that toggle breaks the
+feature for every genuine tray application. Targeted beats global — except the
+targeted hook does not work.
 
-**Implication, and it is a real cost.** Dials now has a dependency on a *third
-party extension's config file* for one of its stated behaviours, and adding a Dial
-for a new application needs a matching rule there. `install.sh` checks and prints
-instructions but does not edit the file — it belongs to another extension, and
-malformed JSON would take Pop Shell's tiling down with it.
+**`skiptaskbarhidden` is dead code in this version of Pop Shell.** `ext.conf` starts
+as `new Config.Config()`, whose constructor sets it to `[]`, and `Config.reload()` —
+the only thing that ever repopulates it — copies out two of the parsed object's three
+fields and drops that one:
+
+```js
+this.float = c.float;
+this.log_on_focus = c.log_on_focus;     // skiptaskbarhidden never assigned
+```
+
+So `skiptaskbar_shall_hide()` only ever sees the hardcoded `SKIPTASKBAR_EXCEPTIONS`.
+That, not hint timing and not anything about allowlists being special, is the real
+reason Guake escapes and nothing user-configured can.
+
+**Actual decision.** `gsettings set org.gnome.shell.extensions.pop-shell
+show-skip-taskbar false`. Supported, user-level, reversible, and Pop Shell watches
+the key, so it applies with no reload. The trade that made it second choice is real
+and now accepted: it is system-wide, so genuine tray-minimising applications lose
+their overview and alt-tab entry too. On this machine that appears to cost nothing —
+Slack unmaps its window rather than setting the flag.
+
+**Implication, method — and this is the reusable part.** The rules were written and
+then *verified to match*, by replicating `skiptaskbar_shall_hide()` in Python against
+the live windows, with Guake as a control. They matched. They did nothing.
+**Verifying that a rule matches is not verifying that the rule is consulted.** The
+replication faithfully reproduced the predicate and inherited its unstated
+assumption: that `this.skiptaskbarhidden` holds what the file holds. Worse,
+`reload()` had already been read earlier in the same session, for the question "does
+it watch the file?", without noticing what it silently omits — the answer to the next
+question was on screen and went unread.
 
 **Implication, method.** Two speculative fixes shipped before anyone read the 60
 lines of JavaScript that decide the behaviour. Both fixes were independently
