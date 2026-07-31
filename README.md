@@ -125,6 +125,18 @@ load-bearing X11 claim was verified on this machine before being written down;
 the ten probe scripts are in `docs/probes/` and can be re-run if GNOME,
 Firefox, or the monitor layout changes.
 
+`docs/IMPLEMENTATION-DECISIONS.md` records every decision taken while building
+this and what each one implies; `docs/RETROSPECTIVE.md` records the process
+failures worth not repeating.
+
+## The Firefox Dial
+
+Slot 6 runs its own Firefox profile, which is tuned differently from the main one
+— including one pref that is deliberately *not* copied from it, because it would
+break WhatsApp Web. See `docs/FIREFOX-DIAL6.md` for why, and
+`config/firefox-dial6-user.js.reference` for the prefs themselves. Read the first
+before changing the second.
+
 ## Human verification required
 
 A few checks depend on physical hardware and human judgment and cannot be
