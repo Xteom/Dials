@@ -1,0 +1,39 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16">
+  <!-- Dials tray icon, LIVE: NumLock is off and the numpad drives your windows.
+
+       A scallop shell, after the One Piece Dials that store energy, so this is
+       the "charged" state, in amber. Amber reads on both light and dark panels,
+       which matters because Gtk.StatusIcon gives no theme signal to branch on.
+
+       The 16x16 viewBox is the design size: the panel renders this at 16-24px,
+       so the rib count and stroke widths are tuned for that, not a big canvas.
+
+       KEEP THE <svg> ELEMENT ON LINE 1. gdk-pixbuf recognises a file by
+       sniffing its first bytes, and a comment long enough to push `<svg` out of
+       that window makes the whole file fail to load with "couldn't recognize
+       the image file format" - which looks like a corrupt icon, not a comment
+       problem. That is why this documentation lives inside the element. -->
+  <g fill="none" stroke-linecap="round" stroke-linejoin="round">
+    <!-- shell body: hinge at bottom centre, six lobes across the top edge -->
+    <path d="M 8 14.9
+             C 5.0 14.6 1.5 11.5 1.5 7.6
+             A 1.7 1.7 0 0 1 3.67 5.38
+             A 1.7 1.7 0 0 1 5.83 4.05
+             A 1.7 1.7 0 0 1 8 3.6
+             A 1.7 1.7 0 0 1 10.17 4.05
+             A 1.7 1.7 0 0 1 12.33 5.38
+             A 1.7 1.7 0 0 1 14.5 7.6
+             C 14.5 11.5 11.0 14.6 8 14.9 Z"
+          fill="#F2A93B" stroke="#8A5410" stroke-width="1.05"/>
+    <!-- radiating ribs, drawn to the lobe valleys and stopped short of the edge -->
+    <g stroke="#8A5410" stroke-width="0.8" opacity="0.75">
+      <path d="M 8 14.3 L 4.19 6.46"/>
+      <path d="M 8 14.3 L 6.09 5.29"/>
+      <path d="M 8 14.3 L 8 4.90"/>
+      <path d="M 8 14.3 L 9.91 5.29"/>
+      <path d="M 8 14.3 L 11.81 6.46"/>
+    </g>
+    <!-- hinge nub -->
+    <path d="M 6.9 14.55 L 9.1 14.55" stroke="#8A5410" stroke-width="1.3"/>
+  </g>
+</svg>

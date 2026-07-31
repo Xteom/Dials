@@ -16,6 +16,14 @@ systemctl --user daemon-reload
 echo "==> removing venv and runtime state"
 rm -rf "$VENV" "$STATE"
 
+echo "==> removing tray icons"
+ICON_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/icons/hicolor/scalable/apps"
+# Named one by one rather than globbed: a glob here is one typo away from
+# deleting somebody else's icons out of a shared theme directory.
+for i in dials-shell dials-shell-dormant dials-shell-paused; do
+  rm -f "$ICON_DIR/$i.svg"
+done
+
 cat <<'EOF'
 
 Dials removed. Every key grab was released when the daemon stopped, so the
