@@ -1,0 +1,112 @@
+// REFERENCE COPY - NOT LIVE. Nothing reads this file.
+// The live file is ~/.mozilla/firefox/wcobxzqa.dial6/user.js
+//
+// Kept in the repo because the Firefox Dial's performance depends on it and a
+// Firefox profile is not version controlled: recreate the dial6 profile and this
+// tuning is silently gone, leaving a Dial that just feels slow. install.sh does
+// NOT copy it - the profile directory name is machine-specific, and writing into
+// a live browser profile is not something an installer should do quietly.
+//
+// To apply on a new machine: copy this into the dial6 profile directory, strip
+// this header, and restart that Firefox instance.
+
+// Firefox 152 tuning for the Dials "dial6" panel profile.
+// Written 2026-07-30. Delete this file to revert everything below.
+//
+// This profile is a PANEL, not a browser: it holds WhatsApp Web, LinkedIn and
+// perhaps another social site, in one window driven by numpad 6. That changes
+// which tweaks are worth making, and it is why this file is NOT a copy of the
+// main profile's user.js - see "deliberately NOT set" at the bottom, which is
+// the more important half of this file.
+//
+// Every pref below was checked against the installed Firefox 152.0.5 (present in
+// libxul or in omni.ja's default pref files) before being written here, because
+// a misspelled pref is silently ignored and looks exactly like a tweak that did
+// not help.
+//
+// Sibling context: ~/Documents/personal/pc_tweaks/firefox_performance/
+//   SESSION_2026-07-27_prefs_and_tab_unloading.md   the main profile's tuning
+//   NEXT_STEPS_nvdec_decode.md                      why no VA-API prefs here
+
+// ---- Video: AV1 off, for the same reason as the main profile ----
+// Decode still runs on the CPU - the external monitors are wired to the dGPU so
+// Firefox composites on the NVIDIA render node and the Intel iGPU cannot engage
+// (established 2026-07-24) - and AV1 software decode costs more than VP9. Sites
+// fall back to VP9. It matters here because LinkedIn autoplays video in-feed.
+// >>> Set back to true once NVDEC decode works; the RTX 4070 decodes AV1.
+user_pref("media.av1.enabled", false);
+
+// ---- Firefox's own tracking protection, turned up ----
+// NOT an ad blocker: this is built-in ETP, so there is no extension resident and
+// no filter lists to parse. It blocks third-party trackers, which on LinkedIn
+// are a real share of the requests and scripts a page load pays for. First-party
+// content is untouched, so LinkedIn and WhatsApp Web themselves work normally.
+// If a site ever misbehaves, use the shield in the URL bar to switch it off for
+// that site rather than deleting these lines.
+user_pref("privacy.trackingprotection.enabled", true);
+user_pref("privacy.trackingprotection.socialtracking.enabled", true);
+
+// ---- New tab page: blank ----
+// The default new tab fetches sponsored top sites and story recommendations over
+// the network when it opens. This profile shows the same two or three sites
+// forever, so that is pure waste. false gives about:blank.
+user_pref("browser.newtabpage.enabled", false);
+
+// ---- Fewer background disk writes (default 15000 ms) ----
+// Longer than the main profile's 60000, deliberately: a panel with a couple of
+// pinned tabs has almost no session state worth checkpointing, so the cost of
+// losing five minutes of it is zero.
+user_pref("browser.sessionstore.interval", 300000);
+
+// ---- URL bar: no network request per keystroke ----
+// Nothing gets typed into this window's URL bar; it exists to hold pinned tabs.
+user_pref("browser.search.suggest.enabled", false);
+
+// ---- Telemetry and recommendation traffic off ----
+// Background pings, ping files on disk, add-on recommendation fetches. Each is
+// small; the point is that this profile should do nothing at all when idle.
+user_pref("toolkit.telemetry.unified", false);
+user_pref("datareporting.healthreport.uploadEnabled", false);
+user_pref("datareporting.policy.dataSubmissionEnabled", false);
+user_pref("browser.discovery.enabled", false);
+
+// ---- Accessibility instrumentation off ----
+// Firefox builds and maintains an accessibility tree whenever an AT-SPI client
+// asks for one, and that costs CPU on every DOM change - which WhatsApp Web does
+// constantly. Set this back to 0 if you ever need a screen reader, Orca, or any
+// AT-SPI-based automation against this window.
+user_pref("accessibility.force_disabled", 1);
+
+// ---- Let the side-loaded Dark Mode extension start enabled ----
+// Default 15 disables extensions dropped into the profile directory until they
+// are approved in the UI. Dark Mode was copied in from the main profile on
+// purpose, so it should come up enabled rather than needing a click.
+user_pref("extensions.autoDisableScopes", 0);
+
+
+// ============================ deliberately NOT set ===========================
+//
+// browser.tabs.unloadOnLowMemory / browser.low_commit_space_threshold_percent
+//   The main profile sets both. Copying them here would be a BUG: unloading a
+//   tab tears down WhatsApp Web's WebSocket, and it then has to reconnect and
+//   re-sync the next time you look at it. Tab unloading is right for a browser
+//   holding eighty tabs and wrong for a messaging panel holding two.
+//
+// dom.ipc.processCount
+//   Tempting for memory, but Fission is on by default in 152, so content
+//   processes are allocated per site and a two-site profile already keeps very
+//   few. Capping the pool would trade memory for cross-site contention with no
+//   measurement to justify it.
+//
+// Any VA-API / dmabuf / hardware-decode pref
+//   Same reason as the main profile, and the same investigation: iGPU decode
+//   cannot engage while the dGPU drives the monitors.
+//
+// browser.safebrowsing.*
+//   Disabling it would save some periodic blocklist downloads - the smallest win
+//   available here, and the worst trade: this is the window where links arrive
+//   from other people. Phishing protection stays on.
+//
+// Ad blocker extensions
+//   Not wanted. privacy.trackingprotection above covers the part of the problem
+//   that actually costs page-load time, with nothing resident in memory.
