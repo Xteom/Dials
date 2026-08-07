@@ -10,6 +10,16 @@ from dials.windows import WindowInfo
 DEFAULT_MONITOR = Monitor(name="HDMI-0", rect=Rect(0, 0, 1920, 1080),
                           primary=True, crtc=1)
 
+# This machine in `system76-power graphics hybrid`: X is driven by modesetting
+# (Intel), and the NVIDIA-attached ultrawide arrives through PRIME as a sink
+# provider, so it is named HDMI-1-0 rather than the HDMI-0 it had under the
+# NVIDIA X driver.
+HYBRID_MONITORS = [
+    Monitor("HDMI-1-0", Rect(0, 0, 3440, 1440), primary=False, crtc=522),
+    Monitor("eDP-1", Rect(488, 1440, 2560, 1440), primary=True, crtc=62),
+]
+HYBRID_ROOT = Rect(0, 0, 3440, 2880)
+
 
 def dial(slot="9", cls="spotify"):
     return Dial(slot=slot, label="Spotify", match_class=cls, launch="spotify",
@@ -58,6 +68,10 @@ def deps(dials=None, paused=False, windows=(), active=None,
         active_window=lambda: active,
         window_geometry=lambda wid: geometry,
         monitor_for=lambda rect: monitor,
+        # Injected in every test, not only the monitor-health ones: the real
+        # default opens an X display, which would make the whole CLI suite pass
+        # or fail depending on whether it ran under a desktop session.
+        monitors=lambda: ([monitor], monitor.rect),
         out=out,
     )
     return d, state, out
@@ -210,6 +224,67 @@ def test_status_counts_bound_dials():
     d, _, out = deps({"9": dial(), "6": dial("6", "Dial6")})
     main(["status"], deps=d)
     assert "2" in out.getvalue()
+
+
+def test_status_warns_when_a_dial_s_monitor_is_absent():
+    """The regression that made 2026-08-07 mysterious.
+
+    Switching the box from `system76-power graphics nvidia` to `hybrid` renamed
+    every NVIDIA output (HDMI-0 -> HDMI-1-0), so pick() fell back to primary and
+    every Dial silently landed on the laptop panel. `dials status` reported
+    "3 bound" and nothing else, which is exactly the report that should have
+    named the problem.
+    """
+    d, _, out = deps({"9": dial()})            # dial() is configured for HDMI-0
+    d.monitors = lambda: (HYBRID_MONITORS, HYBRID_ROOT)
+    assert main(["status"], deps=d) == 0
+    line = next((ln for ln in out.getvalue().splitlines() if "absent" in ln), "")
+    assert "'HDMI-0'" in line, out.getvalue()
+    assert "'eDP-1'" in line, out.getvalue()
+    assert "9" in line, out.getvalue()
+
+
+def test_status_reports_a_broken_config_without_touching_monitors():
+    """The error branch never binds `cfg`, so it must return before the monitor
+    report - which would otherwise raise NameError on a config that fails to
+    load, i.e. exactly when `status` is most needed."""
+    from dials.config import ConfigError
+
+    d, _, out = deps({})
+
+    def _boom(path=None):
+        raise ConfigError("rect must have 4 items")
+
+    d.load = _boom
+    d.monitors = lambda: pytest.fail("monitors read on the config-error path")
+    assert main(["status"], deps=d) == 0
+    assert "ERROR" in out.getvalue()
+    assert "rect must have 4 items" in out.getvalue()
+
+
+def test_status_is_quiet_when_every_dial_resolves():
+    d, _, out = deps({"9": dial()})
+    d.monitors = lambda: (
+        [Monitor("HDMI-0", Rect(0, 0, 3440, 1440), primary=True, crtc=63)],
+        Rect(0, 0, 3440, 1440),
+    )
+    assert main(["status"], deps=d) == 0
+    assert "absent" not in out.getvalue()
+
+
+def test_status_survives_an_unreadable_x_display():
+    """`dials status` must still answer over ssh, where there is no display."""
+    d, _, out = deps({"9": dial()})
+
+    def _boom():
+        raise OSError("no display")
+
+    d.monitors = _boom
+    assert main(["status"], deps=d) == 0
+    text = out.getvalue()
+    assert "3 bound" not in text          # sanity: the count line still renders
+    assert "1 bound" in text
+    assert "absent" not in text
 
 
 def test_config_prints_both_paths_and_flags_drift():

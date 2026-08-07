@@ -11,7 +11,7 @@ import signal
 import sys
 from dataclasses import dataclass, field
 
-from dials import icons, keys
+from dials import icons, keys, monitors
 from dials.config import (
     ConfigError, config_path, load as load_config, reference_path, state_dir,
 )
@@ -87,6 +87,20 @@ def _monitor_for(rect):
     return _monitor_containing(rect, src.monitors(), src.root_rect())
 
 
+def _read_monitors():
+    """Return (monitors, root_rect) for the monitor-health line in `status`.
+
+    Separate from `_monitor_for` because that answers "which monitor is this
+    rect on" and this answers "what is out there at all" - `status` needs the
+    whole list to run every Dial's name through `pick`.
+    """
+    from Xlib import display
+    from dials.monitors import MonitorSource
+    d = display.Display()
+    src = MonitorSource(d, d.screen().root)
+    return src.monitors(), src.root_rect()
+
+
 def _upsert(path, dial):
     from dials.configwrite import upsert_dial
     return upsert_dial(path, dial)
@@ -121,6 +135,7 @@ class Deps:
     active_window: callable = _active_window
     window_geometry: callable = _window_geometry
     monitor_for: callable = _monitor_for
+    monitors: callable = _read_monitors
     out: object = field(default_factory=lambda: sys.stdout)
 
 
@@ -247,6 +262,32 @@ def _cmd_status(args, d: Deps) -> int:
           file=d.out)
     if problem:
         print(f"config:    ERROR {problem}", file=d.out)
+        return 0
+
+    # Monitor health. `pick` already computes a one-line reason for landing
+    # somewhere other than the configured output, and its docstring says that
+    # reason exists for this command - but nothing surfaced it until a graphics
+    # mode switch renamed every output and each Dial quietly moved to the
+    # laptop panel while `status` reported nothing but a count.
+    #
+    # Read failures degrade to one line rather than propagating: `dials status`
+    # has to answer over ssh, where there is no display to open.
+    try:
+        mons, root = d.monitors()
+    except Exception as exc:
+        print(f"monitors:  unreadable ({exc})", file=d.out)
+        return 0
+
+    warnings = [
+        (slot, reason)
+        for slot in sorted(cfg.dials)
+        for _, reason in [monitors.pick(cfg.dials[slot].monitor, mons, root)]
+        if reason
+    ]
+    names = ", ".join(m.name for m in mons) or "none"
+    print(f"monitors:  {names}", file=d.out)
+    for slot, reason in warnings:
+        print(f"monitor:   WARNING slot {slot}: {reason}", file=d.out)
     return 0
 
 
