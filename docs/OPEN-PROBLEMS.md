@@ -4,7 +4,7 @@ Things known to be wrong, unconfirmed, or unresolved, with what is established a
 what the next step is. Settled decisions live in `docs/IMPLEMENTATION-DECISIONS.md`;
 this file is only for what is still open.
 
-Last updated 2026-07-30.
+Last updated 2026-08-07.
 
 ---
 
@@ -145,3 +145,61 @@ already swapped. The note in that project's `user.js` warns against setting the
 threshold near the typical available percentage (~32 %) to avoid latching into
 permanent low-memory mode, so the gap between 15 % and 28 % looks deliberate — but
 it does mean nothing intervenes in exactly this state.
+
+---
+
+## 6. ~~Every Dial opened on the laptop panel~~ — FIXED 2026-08-07
+
+**A monitor's name is not a property of the monitor. It is a property of which
+GPU is driving X**, and nothing in this project assumed that.
+
+Every Dial was configured for `HDMI-0`, the ultrawide. All three opened on the
+laptop panel instead. `pick()` was not broken — it did exactly what it
+documents, and the config named an output that no longer existed:
+
+| `system76-power graphics` | X is driven by | ultrawide | internal panel |
+| --- | --- | --- | --- |
+| `nvidia` | the NVIDIA X driver, owning every output | `HDMI-0` | `eDP-1-1` |
+| `hybrid` | `modesetting` (Intel); NVIDIA attaches as a PRIME **sink** provider | `HDMI-1-0` | `eDP-1` |
+
+The box was in `nvidia` when the config was written on 2026-07-30 and in
+`hybrid` on 2026-08-07. In hybrid mode the NVIDIA-attached outputs arrive
+through a second RandR provider and gain its index as a prefix — `HDMI-0`
+becomes `HDMI-1-0` — so the configured name matched nothing, `pick()` fell
+through to primary, and primary is the laptop. Confirm the mode with
+`system76-power graphics` and `xrandr --listproviders`.
+
+This is **not** the RandR hotplug case the README lists as unverified. Hotplug
+changes which monitors are present; this changes what the same monitor is
+called, and no hotplug event is involved.
+
+### The part that was actually a bug
+
+`pick()` returns a fallback reason, and its docstring says that reason exists
+"for `dials status` so a Dial landing on the wrong screen is visible rather than
+mysterious". Nothing ever surfaced it. `daemon._rect_for` raised a desktop
+notification, which is transient and easy to miss, and `dials status` — the
+command the README advertises as reporting config health — resolved no monitors
+at all and printed only a count. The diagnostic written specifically to stop
+this being mysterious had never been wired to a caller.
+
+`dials status` now lists the live outputs and names every Dial that is not
+landing where it was configured to:
+
+```
+state:     active
+dials:     3 bound of 15 slots
+monitors:  HDMI-1-0, eDP-1
+monitor:   WARNING slot 9: monitor 'HDMI-0' absent; using primary 'eDP-1'
+```
+
+It stays exit-0 and degrades to `monitors:  unreadable (...)` when there is no
+display, because `dials status` has to answer over ssh.
+
+### Still open
+
+The name remains a single exact string, so switching graphics mode back to
+`nvidia` breaks it again in the same way — the reverse direction, silently, and
+now with a warning line that says so. A monitor selector that survives a rename
+(match on resolution, or on geometry, or accept a list of candidate names)
+is the real fix and has not been designed.

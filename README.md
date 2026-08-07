@@ -49,7 +49,7 @@ workspace — until that turned out to be a literal reading of the wrong wish.)
 
 ```sh
 dials list          # every slot
-dials status        # paused or active, how many Dials are bound, config health
+dials status        # paused or active, Dials bound, live outputs, config health
 dials capture 9     # save a window's current position into its Dial
 dials pause         # stand down for a game or remote desktop
 dials              # curses numpad grid
@@ -59,11 +59,32 @@ dials              # curses numpad grid
 
 Live config is `~/.config/dials/config.toml` — the only file anything reads.
 `config/config.reference.toml` in this repo is a **reference snapshot**, read by
-nothing; refresh it with `dials config export`.
+nothing. `dials config export` refreshes it but **regenerates it from the live
+config and drops every comment**, and the comments there are load-bearing — hand-edit
+it, or `git checkout` the file if you overwrite it.
 
 Geometry is stored as a monitor name plus fractions, never absolute pixels,
 because this machine's layout changes: `DP-1-1` was connected during one design
 probe and gone by the next. An absent monitor falls back to primary.
+
+### If every Dial suddenly opens on the wrong screen
+
+Run `dials status`. A Dial that is not landing where it was configured is named
+there, with the output it wanted and the one it got:
+
+```
+monitors:  HDMI-1-0, eDP-1
+monitor:   WARNING slot 9: monitor 'HDMI-0' absent; using primary 'eDP-1'
+```
+
+The usual cause is not a monitor being unplugged — it is **the output being
+renamed**, because an output's name depends on which GPU drives X. Under
+`system76-power graphics nvidia` the NVIDIA driver owns every output and the
+ultrawide is `HDMI-0`; under `hybrid` it arrives through PRIME as a second
+provider and becomes `HDMI-1-0` (and the internal panel goes `eDP-1-1` →
+`eDP-1`). Check with `system76-power graphics` and `xrandr --listproviders`,
+then set `monitor` to whatever `dials status` lists. Full account:
+`docs/OPEN-PROBLEMS.md` §6.
 
 ## What it touches
 
