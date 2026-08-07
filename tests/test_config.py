@@ -114,6 +114,14 @@ def test_xdg_paths_respect_environment(monkeypatch, tmp_path):
     assert config.state_dir() == tmp_path / "state" / "dials"
 
 
+def test_reference_slack_dial_is_buriable():
+    from dials import config
+
+    slack = load(config.reference_path()).dial("5")
+    assert slack is not None
+    assert slack.on_focus_loss == "normal"
+
+
 # ---- strict type validation (Item 1, task 11b) ----------------------------
 
 

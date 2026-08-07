@@ -66,7 +66,9 @@ launch        = "flatpak run com.slack.Slack"
 # second place to keep in sync.
 monitor       = "HDMI-0"
 rect          = [0.5, 0.0, 0.5, 1.0]
-on_focus_loss = "hide"
+# Keep Slack visible when focus moves elsewhere, but allow other windows to
+# bury it; pressing 5 surfaces it again.
+on_focus_loss = "normal"
 
 
 # Right-hand 30% of the ultrawide, full height. Overlaps the right end of the
