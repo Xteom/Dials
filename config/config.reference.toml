@@ -13,7 +13,19 @@
 [defaults]
 # Falls back to primary if this output is absent. Never store absolute pixels -
 # the layout on this machine has changed mid-session before.
-monitor       = "HDMI-0"
+#
+# The output NAME is not stable either, and it is not a hotplug story: it
+# depends on which GPU drives X.
+#   system76-power graphics nvidia  -> NVIDIA owns every output: "HDMI-0", "eDP-1-1"
+#   system76-power graphics hybrid  -> Intel/modesetting owns X and the NVIDIA
+#                                      outputs arrive through PRIME as a SINK
+#                                      provider, so they gain a provider prefix:
+#                                      "HDMI-1-0", and the panel becomes "eDP-1"
+# On 2026-08-07 this box was in `hybrid`, every Dial's "HDMI-0" matched nothing,
+# and pick() did exactly what it promises - fell back to primary - so all three
+# Dials silently moved to the laptop panel. `dials status` now names that,
+# instead of only counting bound Dials.
+monitor       = "HDMI-1-0"
 # x, y, w, h as fractions of the monitor rect
 rect          = [0.0, 0.0, 0.5, 1.0]
 # normal = can be buried | above = never buried | hide = hides on focus loss
@@ -42,7 +54,7 @@ match_class   = "Spotify"
 # spotify_width project. Without it Spotify refuses to go narrow.
 launch        = "/snap/bin/spotify --force-device-scale-factor=0.7"
 icon          = ""
-monitor       = "HDMI-0"
+monitor       = "HDMI-1-0"
 rect          = [0.5, 0.0, 0.5, 1.0]
 # "normal", not "hide": clicking away from Spotify must not put it away. Still
 # buriable, so another window can cover it and pressing 9 surfaces it again.
@@ -64,7 +76,7 @@ launch        = "flatpak run com.slack.Slack"
 # No `icon` key on purpose: icons.py resolves the glyph from match_class
 # ("Slack" -> "slack" -> the Slack glyph), so hardcoding it here would just be a
 # second place to keep in sync.
-monitor       = "HDMI-0"
+monitor       = "HDMI-1-0"
 rect          = [0.5, 0.0, 0.5, 1.0]
 # Keep Slack visible when focus moves elsewhere, but allow other windows to
 # bury it; pressing 5 surfaces it again.
@@ -85,7 +97,7 @@ match_class   = "Dial6"
 #   firefox --profile ~/.mozilla/firefox/wcobxzqa.dial6 --class=Dial6 ...
 launch        = "firefox -P dial6 --class=Dial6 --no-remote --new-instance"
 icon          = ""
-monitor       = "HDMI-0"
+monitor       = "HDMI-1-0"
 # x = 0.7 so the 30% sits flush with the right edge (0.7 + 0.3 = 1.0). Fractions
 # must sum to at most 1.0 or the Dial would be placed off-monitor.
 rect          = [0.7, 0.0, 0.3, 1.0]
