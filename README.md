@@ -67,24 +67,54 @@ Geometry is stored as a monitor name plus fractions, never absolute pixels,
 because this machine's layout changes: `DP-1-1` was connected during one design
 probe and gone by the next. An absent monitor falls back to primary.
 
+`monitor` accepts three forms, checked in this order:
+
+```toml
+monitor = "edid:AW3425DWM"     # the display's own EDID model name
+monitor = "internal"           # the built-in panel, whatever its connector is
+monitor = "connector:HDMI-0"   # an exact connector name, explicitly
+monitor = "HDMI-0"             # bare string: still a connector name, as before
+```
+
+Prefer `edid:` or `internal` for anything that is not a laptop-only setup:
+they name the *display*, not the socket it happens to occupy this boot — see
+below for why that distinction turned out to matter. `dials status` lists the
+live connector and EDID name of every attached display, so the right value is
+read off, never guessed.
+
 ### If every Dial suddenly opens on the wrong screen
 
 Run `dials status`. A Dial that is not landing where it was configured is named
-there, with the output it wanted and the one it got:
+there, with what it wanted and what is present:
 
 ```
-monitors:  HDMI-1-0, eDP-1
+monitors:  HDMI-1-0 (AW3425DWM), eDP-1 (internal)
 monitor:   WARNING slot 9: monitor 'HDMI-0' absent; using primary 'eDP-1'
 ```
 
-The usual cause is not a monitor being unplugged — it is **the output being
-renamed**, because an output's name depends on which GPU drives X. Under
-`system76-power graphics nvidia` the NVIDIA driver owns every output and the
-ultrawide is `HDMI-0`; under `hybrid` it arrives through PRIME as a second
-provider and becomes `HDMI-1-0` (and the internal panel goes `eDP-1-1` →
-`eDP-1`). Check with `system76-power graphics` and `xrandr --listproviders`,
-then set `monitor` to whatever `dials status` lists. Full account:
-`docs/OPEN-PROBLEMS.md` §6.
+The usual cause is not a monitor being unplugged — it is **the connector name
+changing under an unchanged physical display.** An output's connector name
+depends on which GPU X treats as primary, and that in turn follows whichever
+GPU the firmware marks `boot_vga`: the primary GPU's outputs keep their plain
+names, the other GPU attaches as a secondary RandR provider and its outputs
+gain that provider's index spliced in. NVIDIA primary → ultrawide `HDMI-0`,
+panel `eDP-1-1`. Intel (`modesetting`) primary → ultrawide `HDMI-1-0`, panel
+`eDP-1`. Same cable, same panel, both times.
+
+**This is not `system76-power graphics` switching between `nvidia` and
+`hybrid`.** That was the first, wrong theory: the mode read `hybrid` on both
+the boot that broke and the boot that worked, so it is not the trigger.
+Confirmed instead from the `*` marking the primary PCI device in
+`~/.local/share/xorg/Xorg.1.log`, which moved between the two boots, and from
+`/sys/bus/pci/devices/0000:01:00.0/boot_vga` in sysfs. What flips `boot_vga`
+itself is not settled — connecting the external monitor before power-on is the
+leading hypothesis, from two data points, not proven.
+
+The fix is to stop naming the socket: point `monitor` at the display's own
+EDID name (`edid:AW3425DWM`) or at `internal`, either of which survives the
+rename because neither depends on which GPU is primary. Full account and
+design: `docs/OPEN-PROBLEMS.md` §6 and
+`docs/superpowers/specs/2026-08-09-monitor-identity-design.md`.
 
 ## What it touches
 

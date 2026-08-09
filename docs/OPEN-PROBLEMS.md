@@ -4,7 +4,7 @@ Things known to be wrong, unconfirmed, or unresolved, with what is established a
 what the next step is. Settled decisions live in `docs/IMPLEMENTATION-DECISIONS.md`;
 this file is only for what is still open.
 
-Last updated 2026-08-07.
+Last updated 2026-08-09.
 
 ---
 
@@ -148,26 +148,42 @@ it does mean nothing intervenes in exactly this state.
 
 ---
 
-## 6. ~~Every Dial opened on the laptop panel~~ — FIXED 2026-08-07
+## 6. ~~Every Dial opened on the laptop panel~~ — FIXED 2026-08-07, root cause corrected 2026-08-09
 
 **A monitor's name is not a property of the monitor. It is a property of which
 GPU is driving X**, and nothing in this project assumed that.
 
 Every Dial was configured for `HDMI-0`, the ultrawide. All three opened on the
 laptop panel instead. `pick()` was not broken — it did exactly what it
-documents, and the config named an output that no longer existed:
+documents, and the config named an output that no longer existed.
 
-| `system76-power graphics` | X is driven by | ultrawide | internal panel |
-| --- | --- | --- | --- |
-| `nvidia` | the NVIDIA X driver, owning every output | `HDMI-0` | `eDP-1-1` |
-| `hybrid` | `modesetting` (Intel); NVIDIA attaches as a PRIME **sink** provider | `HDMI-1-0` | `eDP-1` |
+**Corrected 2026-08-09: the table below and the `system76-power graphics`
+attribution that used to sit here were wrong.** `system76-power graphics`
+reported `hybrid` on *both* the boot that broke and the boot that worked, so
+the graphics mode never changed and was never the trigger. That was checked at
+the time and misread — see the design doc's *Evidence* for the actual
+measurement.
 
-The box was in `nvidia` when the config was written on 2026-07-30 and in
-`hybrid` on 2026-08-07. In hybrid mode the NVIDIA-attached outputs arrive
-through a second RandR provider and gain its index as a prefix — `HDMI-0`
-becomes `HDMI-1-0` — so the configured name matched nothing, `pick()` fell
-through to primary, and primary is the laptop. Confirm the mode with
-`system76-power graphics` and `xrandr --listproviders`.
+What changes the name is which GPU the firmware marks `boot_vga`, and
+therefore which one X treats as primary. Both GPUs supply outputs; the
+primary GPU's outputs keep their plain connector names, and the other GPU
+attaches as a secondary RandR provider whose outputs get that provider's
+index spliced in:
+
+| X primary | ultrawide | internal panel |
+| --- | --- | --- |
+| NVIDIA | `HDMI-0` | `eDP-1-1` |
+| Intel (`modesetting`) | `HDMI-1-0` | `eDP-1` |
+
+Same cable, same panel, both times. Verified from the `*` marking the primary
+PCI device in `~/.local/share/xorg/Xorg.1.log`, which moved between the two
+boots, and from `/sys/bus/pci/devices/0000:01:00.0/boot_vga` in sysfs, which
+currently reads `1` on the NVIDIA card. **What flips `boot_vga` itself is not
+settled** — whether the external monitor is connected at power-on is the
+leading hypothesis, from two data points; that is not proof, and is stated
+here as a hypothesis, not a mechanism. `pick()` fell through to primary
+exactly as documented once the configured name matched nothing, and primary
+was the laptop.
 
 This is **not** the RandR hotplug case the README lists as unverified. Hotplug
 changes which monitors are present; this changes what the same monitor is
@@ -196,10 +212,94 @@ monitor:   WARNING slot 9: monitor 'HDMI-0' absent; using primary 'eDP-1'
 It stays exit-0 and degrades to `monitors:  unreadable (...)` when there is no
 display, because `dials status` has to answer over ssh.
 
-### Still open
+### Fixed for real, 2026-08-09: EDID-based selection
 
-The name remains a single exact string, so switching graphics mode back to
-`nvidia` breaks it again in the same way — the reverse direction, silently, and
-now with a warning line that says so. A monitor selector that survives a rename
-(match on resolution, or on geometry, or accept a list of candidate names)
-is the real fix and has not been designed.
+The warning line bought visibility, not survival — the name was still a
+single exact connector string, so a `boot_vga` flip in either direction broke
+it again the same way. The actual fix is to stop naming the socket: `monitor`
+now accepts `edid:NAME` (the display's own EDID model name, parsed from its
+`0xFC` descriptor) and `internal` (the built-in panel, by connector type, since
+panels don't carry a model name), either of which resolves to the same
+physical display regardless of which GPU X treats as primary this boot. A bare
+string, or `connector:NAME`, still means an exact connector, unchanged, for
+anyone who wants that.
+
+This config now uses `edid:AW3425DWM` for the ultrawide. Full design, including
+why a candidate list of connector names is not a sound alternative and how
+ambiguity (two monitors sharing a name) is handled:
+`docs/superpowers/specs/2026-08-09-monitor-identity-design.md`.
+
+---
+
+## 7. `monitor_warnings` is never cleared
+
+**Status: found while designing the EDID fix (§6), not addressed — pre-existing
+and independent of that change.**
+
+`daemon.py:144` writes `self.monitor_warnings[dial.slot] = warning` whenever a
+Dial's resolution falls back, and nothing ever deletes an entry. So: a monitor
+disappears, the Dial warns, the monitor comes back and the Dial resolves
+cleanly again, the monitor disappears a second time — the second, identical
+warning is suppressed, because the dict still holds the first one and the
+write at `daemon.py:143` is gated on the value having *changed*, not on it
+having been re-observed.
+
+**Next step:** clear (or re-set) the slot's entry on a successful resolution,
+not only write it on failure, so "still broken" and "broken again" are
+distinguishable from "fixed since last checked."
+
+## 8. `select_events` omits `RROutputPropertyNotifyMask`
+
+**Status: found while designing the EDID fix (§6), not addressed.**
+
+EDID is exposed as an output property, but `monitors.py`'s `select_events`
+(around `daemon.py:625`, `monitors.py:298`) only asks for
+`RRScreenChangeNotifyMask | RRCrtcChangeNotifyMask | RROutputChangeNotifyMask`.
+A hotplug normally *also* fires an output-change event, so in practice a
+display's EDID becoming readable (or unreadable) tends to be noticed anyway —
+but "normally" is exactly the word a design with no polling should not lean
+on. If a compositor or driver ever updates the EDID property in isolation,
+without an accompanying output-change event, `dials status` and `pick()` would
+keep using a stale cached read until some other event happened to trigger a
+refresh.
+
+**Next step:** add `RROutputPropertyNotifyMask` to the event mask and confirm
+with a real hotplug that the cache actually refreshes on an EDID-only change,
+not just on the output-change event that usually rides along with it.
+
+## 9. `dedupe_and_sort` can drop the identity that would have matched
+
+**Status: found while designing the EDID fix (§6), not addressed.**
+
+`dedupe_and_sort` (`monitors.py:149`) keeps one `RawOutput` per CRTC. That is
+correct for a *mirrored* pair — one CRTC, one picture, one `Monitor` — but the
+two connectors feeding that CRTC can carry different EDIDs (or one may read
+successfully while the other fails), and only one of the two survives
+deduplication. If the dropped connector was the one whose EDID matched
+`edid:NAME`, selection reports "no display named …" against a display that is,
+physically, right there — a false negative indistinguishable from the display
+being genuinely absent.
+
+**Next step:** a logical `Monitor` should retain the EDIDs (and connector
+names) of every `RawOutput` sharing its CRTC, and `pick()`'s name match should
+check all of them, not just the one that happened to survive dedup. No mirrored
+setup exists on this hardware to reproduce it against, so this needs either
+borrowed mirrored hardware or a targeted unit test against a synthetic
+CRTC-sharing pair.
+
+## 10. The first Dial keypress after startup pays ~146 ms for the monitor cache
+
+**Status: found while designing the EDID fix (§6), not addressed.**
+
+`MonitorSource` builds its cache lazily (`monitors.py:274`) — the first call to
+`monitors()` does the full RandR walk, EDID reads included. Measured on this
+machine at 20 iterations, a full refresh costs ~146 ms regardless of whether
+EDID is read (the EDID reads themselves are noise against that). Today, the
+first thing that triggers a refresh is the first Dial keypress, so that
+keypress — not daemon startup — eats the 146 ms, and a user pressing a Dial
+right after login gets a visibly delayed first show.
+
+**Next step:** call `monitors()` once at daemon start, immediately after
+`select_events()` (`daemon.py:625`), purely to prime the cache. This adds no
+polling — it is one extra read at a point that already does one-time setup —
+and moves the cost off the interactive path.
