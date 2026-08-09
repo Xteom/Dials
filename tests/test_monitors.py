@@ -1,7 +1,7 @@
 from dials.geometry import Monitor, Rect
 from dials.monitors import (
     MonitorSource, RawOutput, dedupe_and_sort, edid_name, is_internal,
-    parse_selector, pick,
+    parse_selector, pick, selector_for,
 )
 
 ROOT = Rect(0, 0, 3440, 2880)
@@ -399,3 +399,38 @@ def test_read_edid_distinguishes_absent_from_failed(monkeypatch):
 
     monkeypatch.setattr(randr, "get_output_property", _boom)
     assert src._read_edid(1, 2) == (None, True)       # failure, not absence
+
+
+def test_selector_for_prefers_edid_for_a_named_external_display():
+    mons = dedupe_and_sort(BOOT_NVIDIA_PRIMARY)
+    ultrawide = next(m for m in mons if m.name == "HDMI-0")
+    assert selector_for(ultrawide, mons) == "edid:AW3425DWM"
+
+
+def test_selector_for_prefers_internal_over_a_model_name():
+    # "the built-in screen" is a more durable statement of intent than a
+    # panel's model number, so internal outranks edid:.
+    named_panel = RawOutput("eDP-1", 62, 0, 0, 2560, 1440, True,
+                            edid=EDID_ULTRAWIDE)
+    mons = dedupe_and_sort([named_panel])
+    assert selector_for(mons[0], mons) == "internal"
+
+
+def test_selector_for_will_not_write_a_name_two_displays_share():
+    twin_a = RawOutput("DP-1", 70, 0, 0, 1920, 1080, True, edid=EDID_ULTRAWIDE)
+    twin_b = RawOutput("DP-2", 71, 1920, 0, 1920, 1080, False, edid=EDID_ULTRAWIDE)
+    mons = dedupe_and_sort([twin_a, twin_b])
+    assert selector_for(mons[0], mons) == "DP-1"      # bare connector
+
+
+def test_selector_for_falls_back_to_the_bare_connector_when_unnamed():
+    raw = RawOutput("HDMI-0", 63, 0, 0, 3440, 1440, True)
+    mons = dedupe_and_sort([raw])
+    assert selector_for(mons[0], mons) == "HDMI-0"
+
+
+def test_selector_for_refuses_when_the_identity_could_not_be_read():
+    # None means "do not persist anything" - see the write path.
+    raw = RawOutput("HDMI-0", 63, 0, 0, 3440, 1440, True, edid_failed=True)
+    mons = dedupe_and_sort([raw])
+    assert selector_for(mons[0], mons) is None

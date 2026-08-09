@@ -122,6 +122,30 @@ def is_internal(connector: str) -> bool:
     return connector.split("-")[0].lower() in INTERNAL_TYPES
 
 
+def selector_for(monitor: Monitor, all_monitors: list[Monitor]) -> str | None:
+    """The most durable config value naming `monitor`, or None to refuse.
+
+    Needs the FULL monitor list, not just one monitor: whether a display name
+    identifies anything is a question about the whole set. A name two displays
+    share is not an identity.
+
+    Returns None when the identity could not be read. Callers that PERSIST the
+    result must write nothing in that case. Degrading to a connector name is
+    fine for placing a window and wrong for config: it would swap a
+    rename-proof selector for a fragile one at exactly the moment X is
+    misbehaving, and the damage outlives the moment.
+    """
+    if not monitor.identity_reliable:
+        return None
+    if is_internal(monitor.name):
+        if sum(1 for m in all_monitors if is_internal(m.name)) == 1:
+            return "internal"
+    name = monitor.display_name
+    if name and sum(1 for m in all_monitors if m.display_name == name) == 1:
+        return f"edid:{name}"
+    return monitor.name
+
+
 def dedupe_and_sort(raws: list[RawOutput]) -> list[Monitor]:
     """Drop disconnected outputs, collapse mirrored ones, order deterministically.
 
