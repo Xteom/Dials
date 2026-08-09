@@ -434,3 +434,24 @@ def test_selector_for_refuses_when_the_identity_could_not_be_read():
     raw = RawOutput("HDMI-0", 63, 0, 0, 3440, 1440, True, edid_failed=True)
     mons = dedupe_and_sort([raw])
     assert selector_for(mons[0], mons) is None
+
+
+def test_selector_for_internal_but_not_unique_falls_through():
+    # Regression: the internal check must not short-circuit when there are
+    # multiple internal monitors. If the inner if became if/else, a future
+    # refactor would wrongly return "internal" for the second panel.
+    panel_a = RawOutput("eDP-1", 62, 0, 0, 2560, 1440, True, edid=EDID_PANEL)
+    panel_b = RawOutput("eDP-2", 63, 2560, 0, 2560, 1440, False, edid=EDID_ULTRAWIDE)
+    mons = dedupe_and_sort([panel_a, panel_b])
+    # Neither should return "internal" because both are internal.
+    assert selector_for(mons[0], mons) != "internal"
+    assert selector_for(mons[1], mons) != "internal"
+
+
+def test_selector_for_refuses_unreliable_identity_even_on_internal_connector():
+    # Regression: identity_reliable gate must stay BEFORE the internal check.
+    # If it moved below, an internal connector with edid_failed=True would
+    # wrongly return "internal" instead of None.
+    panel = RawOutput("eDP-1", 62, 0, 0, 2560, 1440, True, edid_failed=True)
+    mons = dedupe_and_sort([panel])
+    assert selector_for(mons[0], mons) is None
