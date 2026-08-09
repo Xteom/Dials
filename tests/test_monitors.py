@@ -288,3 +288,88 @@ def test_existing_positional_rawoutput_construction_still_works():
     # be appended with defaults, never inserted.
     raw = RawOutput("HDMI-0", 63, 0, 0, 3440, 1440, False)
     assert raw.edid is None and raw.edid_failed is False
+
+
+# The two boot configurations this whole feature exists to survive. Same
+# physical desk; X named the outputs differently on 2026-08-07 and 2026-08-09.
+BOOT_INTEL_PRIMARY = [
+    RawOutput("HDMI-1-0", 522, 0, 0, 3440, 1440, False, edid=EDID_ULTRAWIDE),
+    RawOutput("eDP-1", 62, 488, 1440, 2560, 1440, True, edid=EDID_PANEL),
+]
+BOOT_NVIDIA_PRIMARY = [
+    RawOutput("HDMI-0", 63, 0, 0, 3440, 1440, False, edid=EDID_ULTRAWIDE),
+    RawOutput("eDP-1-1", 62, 388, 1440, 2560, 1440, True, edid=EDID_PANEL),
+]
+
+
+def test_edid_selector_finds_the_same_display_across_both_boots():
+    """THE regression test. This is the incident, encoded.
+
+    A connector name picks the ultrawide on one boot and silently falls back to
+    the laptop panel on the other. An EDID name must pick the ultrawide on both.
+    """
+    for raws in (BOOT_INTEL_PRIMARY, BOOT_NVIDIA_PRIMARY):
+        mons = dedupe_and_sort(raws)
+        chosen, reason = pick("edid:AW3425DWM", mons, ROOT)
+        assert chosen.rect == Rect(0, 0, 3440, 1440)
+        assert reason is None
+
+
+def test_internal_selector_finds_the_panel_across_both_boots():
+    for raws in (BOOT_INTEL_PRIMARY, BOOT_NVIDIA_PRIMARY):
+        mons = dedupe_and_sort(raws)
+        chosen, reason = pick("internal", mons, ROOT)
+        assert chosen.rect.w == 2560
+        assert reason is None
+
+
+def test_connector_prefix_is_equivalent_to_a_bare_name():
+    mons = dedupe_and_sort(BOOT_NVIDIA_PRIMARY)
+    assert pick("connector:HDMI-0", mons, ROOT)[0].name == "HDMI-0"
+    assert pick("HDMI-0", mons, ROOT)[0].name == "HDMI-0"
+
+
+def test_absent_edid_name_falls_back_and_lists_what_is_present():
+    mons = dedupe_and_sort(BOOT_NVIDIA_PRIMARY)
+    chosen, reason = pick("edid:NOPE", mons, ROOT)
+    assert chosen.name == "eDP-1-1"           # primary
+    assert "NOPE" in reason
+    assert "AW3425DWM" in reason              # what you could have typed
+
+
+def test_two_displays_sharing_a_name_are_ambiguous_not_first_wins():
+    """Silently taking the first match would LOOK like success.
+
+    That is the failure class this feature exists to end, so an ambiguous
+    selector must fall back and say so.
+    """
+    twin_a = RawOutput("DP-1", 70, 0, 0, 1920, 1080, False, edid=EDID_ULTRAWIDE)
+    twin_b = RawOutput("DP-2", 71, 1920, 0, 1920, 1080, False, edid=EDID_ULTRAWIDE)
+    panel = RawOutput("eDP-1", 62, 0, 1080, 2560, 1440, True, edid=EDID_PANEL)
+    mons = dedupe_and_sort([twin_a, twin_b, panel])
+    chosen, reason = pick("edid:AW3425DWM", mons, ROOT)
+    assert chosen.name == "eDP-1"             # fell back to primary
+    assert "ambiguous" in reason
+    assert "DP-1" in reason and "DP-2" in reason
+
+
+def test_two_internal_panels_are_ambiguous():
+    a = RawOutput("eDP-1", 62, 0, 0, 2560, 1440, True)
+    b = RawOutput("eDP-2", 63, 2560, 0, 2560, 1440, False)
+    chosen, reason = pick("internal", dedupe_and_sort([a, b]), ROOT)
+    assert "more than one internal" in reason
+
+
+def test_no_internal_panel_present_falls_back():
+    mons = dedupe_and_sort([RawOutput("HDMI-0", 63, 0, 0, 3440, 1440, True)])
+    chosen, reason = pick("internal", mons, ROOT)
+    assert chosen.name == "HDMI-0"
+    assert "no internal panel" in reason
+
+
+def test_an_invalid_selector_falls_back_rather_than_raising():
+    # config.py rejects these at load; pick must still never raise.
+    mons = dedupe_and_sort(BOOT_NVIDIA_PRIMARY)
+    chosen, reason = pick("foo:bar", mons, ROOT)
+    assert chosen.name == "eDP-1-1"
+    assert "invalid monitor selector" in reason

@@ -152,31 +152,69 @@ def dedupe_and_sort(raws: list[RawOutput]) -> list[Monitor]:
     return sorted(monitors, key=lambda m: (m.rect.x, m.rect.y, m.name))
 
 
-def pick(
-    name: str, monitors: list[Monitor], root_rect: Rect
+def _fallback(
+    monitors: list[Monitor], root_rect: Rect, problem: str
 ) -> tuple[Monitor, str | None]:
-    """Resolve a Dial's monitor name through the four-step fallback chain.
+    """The unchanged destination chain: primary -> first -> root box.
 
-    Returns (monitor, fallback_reason). `reason` is None only when the named
-    monitor was found; otherwise it is a one-line explanation for `dials status`
-    so a Dial landing on the wrong screen is visible rather than mysterious.
+    Split out of `pick` so every selector kind shares one set of destinations
+    and only the `problem` half of the reason differs.
     """
     for m in monitors:
-        if m.name == name:
-            return m, None
-
-    for m in monitors:
         if m.primary:
-            return m, f"monitor {name!r} absent; using primary {m.name!r}"
-
+            return m, f"{problem}; using primary {m.name!r}"
     if monitors:
         m = monitors[0]
-        return m, f"monitor {name!r} absent and no primary; using first {m.name!r}"
-
+        return m, f"{problem} and no primary; using first {m.name!r}"
     return (
         Monitor(name="<root>", rect=root_rect, primary=True, crtc=0),
-        f"monitor {name!r} absent and no usable monitors; using root box",
+        f"{problem} and no usable monitors; using root box",
     )
+
+
+def pick(
+    selector: str, monitors: list[Monitor], root_rect: Rect
+) -> tuple[Monitor, str | None]:
+    """Resolve a Dial's monitor selector to a monitor.
+
+    Returns (monitor, fallback_reason). `reason` is None only on an exact,
+    UNAMBIGUOUS match; otherwise it is a one-line explanation for
+    `dials status`, so a Dial landing on the wrong screen is visible rather
+    than mysterious.
+
+    Three outcomes, not two. Two displays matching one selector must NOT
+    resolve to the first of them: that would look like success, and looking
+    like success while placing windows on the wrong screen is the failure this
+    exists to end.
+    """
+    try:
+        kind, name = parse_selector(selector)
+    except ValueError as exc:
+        return _fallback(monitors, root_rect, f"invalid monitor selector: {exc}")
+
+    if kind == "edid":
+        matches = [m for m in monitors if m.display_name == name]
+        present = ", ".join(
+            m.display_name for m in monitors if m.display_name
+        ) or "none"
+        absent = f"no display named {name!r} (displays present: {present})"
+        ambiguous = f"display name {name!r} is ambiguous"
+    elif kind == "internal":
+        matches = [m for m in monitors if is_internal(m.name)]
+        connectors = ", ".join(m.name for m in monitors) or "none"
+        absent = f"no internal panel found (connectors: {connectors})"
+        ambiguous = "more than one internal panel"
+    else:
+        matches = [m for m in monitors if m.name == name]
+        absent = f"monitor {name!r} absent"
+        ambiguous = f"connector {name!r} is ambiguous"
+
+    if len(matches) == 1:
+        return matches[0], None
+    if matches:
+        found = ", ".join(m.name for m in matches)
+        return _fallback(monitors, root_rect, f"{ambiguous} ({found})")
+    return _fallback(monitors, root_rect, absent)
 
 
 class MonitorSource:
