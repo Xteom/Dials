@@ -20,6 +20,7 @@ except ModuleNotFoundError:  # Python 3.10, our pinned interpreter
     import tomli as _toml
 
 from dials import keys
+from dials.monitors import parse_selector
 
 VALID_FOCUS_LOSS = ("normal", "above", "hide")
 
@@ -129,6 +130,21 @@ def _str(value, field: str, where: str) -> str:
     return value
 
 
+def _monitor(value, field_where: str) -> str:
+    """Validate the monitor SELECTOR at load time, not at show time.
+
+    A bad selector is a startup error with a clear message, the same treatment
+    a bad rect already gets - rather than a Dial that silently lands on the
+    wrong screen, which is the exact failure this whole feature exists to end.
+    """
+    text = _str(value, "monitor", field_where)
+    try:
+        parse_selector(text)
+    except ValueError as exc:
+        raise ConfigError(f"{field_where}: monitor={text!r}: {exc}") from None
+    return text
+
+
 def _table(value, key: str, correct: str) -> dict:
     """Every ConfigError has to be a ConfigError, not an AttributeError.
 
@@ -149,7 +165,7 @@ def _defaults(raw: dict) -> Defaults:
     base = Defaults()
     return replace(
         base,
-        monitor=_str(raw.get("monitor", base.monitor), "monitor", "defaults"),
+        monitor=_monitor(raw.get("monitor", base.monitor), "defaults"),
         rect=_rect(raw.get("rect", list(base.rect)), "defaults"),
         on_focus_loss=_focus_loss(
             raw.get("on_focus_loss", base.on_focus_loss), "defaults"
@@ -197,7 +213,7 @@ def _dial(slot: str, raw: dict, defaults: Defaults) -> Dial:
         match_class=match_class,
         launch=launch,
         icon=_str(raw.get("icon", ""), "icon", where),
-        monitor=_str(raw.get("monitor", defaults.monitor), "monitor", where),
+        monitor=_monitor(raw.get("monitor", defaults.monitor), where),
         rect=_rect(raw.get("rect", list(defaults.rect)), where),
         on_focus_loss=_focus_loss(
             raw.get("on_focus_loss", defaults.on_focus_loss), where

@@ -1,6 +1,7 @@
 from dials.geometry import Monitor, Rect
 from dials.monitors import (
-    MonitorSource, RawOutput, dedupe_and_sort, edid_name, pick,
+    MonitorSource, RawOutput, dedupe_and_sort, edid_name, is_internal,
+    parse_selector, pick,
 )
 
 ROOT = Rect(0, 0, 3440, 2880)
@@ -206,3 +207,57 @@ def test_edid_name_rejects_a_truncated_blob():
 def test_edid_name_handles_none_and_empty():
     assert edid_name(None) is None
     assert edid_name(b"") is None
+
+
+import pytest
+
+
+def test_parse_selector_bare_string_is_a_connector():
+    # Back-compat: every config written before this feature keeps its meaning.
+    assert parse_selector("HDMI-0") == ("connector", "HDMI-0")
+
+
+def test_parse_selector_reads_the_edid_and_connector_prefixes():
+    assert parse_selector("edid:AW3425DWM") == ("edid", "AW3425DWM")
+    assert parse_selector("connector:eDP-1-1") == ("connector", "eDP-1-1")
+
+
+def test_parse_selector_internal_is_a_bare_keyword():
+    assert parse_selector("internal") == ("internal", "")
+
+
+def test_parse_selector_splits_on_the_first_colon_only():
+    # An EDID name containing a colon must survive intact.
+    assert parse_selector("edid:ACME:17") == ("edid", "ACME:17")
+
+
+def test_parse_selector_strips_surrounding_whitespace():
+    assert parse_selector("  edid: AW3425DWM  ") == ("edid", "AW3425DWM")
+
+
+def test_parse_selector_rejects_an_unknown_prefix():
+    with pytest.raises(ValueError, match="unknown monitor selector"):
+        parse_selector("foo:bar")
+
+
+def test_parse_selector_rejects_an_empty_name():
+    with pytest.raises(ValueError, match="empty name"):
+        parse_selector("edid:")
+
+
+def test_parse_selector_rejects_an_empty_value():
+    with pytest.raises(ValueError, match="must not be empty"):
+        parse_selector("   ")
+
+
+def test_is_internal_matches_the_panel_under_both_boot_namings():
+    # The rename moves only the INDEX; the connector TYPE never changes.
+    assert is_internal("eDP-1")
+    assert is_internal("eDP-1-1")
+    assert is_internal("LVDS-0")
+    assert is_internal("DSI-1")
+
+
+def test_is_internal_rejects_external_connectors():
+    for name in ("HDMI-0", "HDMI-1-0", "DP-1-1", "<root>"):
+        assert not is_internal(name)

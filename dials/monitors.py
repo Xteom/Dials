@@ -63,6 +63,59 @@ def edid_name(blob: bytes | None) -> str | None:
     return None
 
 
+#: Connector types that mean "the panel built into this machine".
+INTERNAL_TYPES = ("edp", "lvds", "dsi")
+
+
+def parse_selector(value: str) -> tuple[str, str]:
+    """Split a config `monitor` value into (kind, name).
+
+        "edid:NAME"       -> ("edid", "NAME")
+        "connector:NAME"  -> ("connector", "NAME")
+        "internal"        -> ("internal", "")
+        "NAME"            -> ("connector", "NAME")   - unchanged meaning
+
+    Raises ValueError, NOT ConfigError: `config.py` wraps it. monitors.py must
+    not import config.py - neither module knows the other exists today, and a
+    cycle here would be gratuitous.
+
+    Splits on the FIRST colon so an EDID name containing one survives.
+    """
+    text = value.strip()
+    if not text:
+        raise ValueError("monitor must not be empty")
+    if text == "internal":
+        return ("internal", "")
+    head, sep, tail = text.partition(":")
+    if not sep:
+        return ("connector", text)
+    kind, name = head.strip(), tail.strip()
+    if kind not in ("edid", "connector"):
+        raise ValueError(
+            f"unknown monitor selector {kind!r}; use 'edid:', 'connector:', "
+            "'internal', or a bare connector name"
+        )
+    if not name:
+        raise ValueError(f"{kind}: selector has an empty name")
+    return (kind, name)
+
+
+def is_internal(connector: str) -> bool:
+    """True if `connector` is this machine's built-in panel.
+
+    Keys off the connector TYPE - the part before the first '-' - because the
+    rename this feature exists to survive only ever moves the INDEX:
+    eDP-1 <-> eDP-1-1, HDMI-0 <-> HDMI-1-0. The type never changes.
+
+    RandR's ConnectorType property ("Panel") would be a stronger signal and
+    cannot be used. Measured on this machine, the internal panel is the one
+    output that does NOT expose it - modesetting drives that panel under both
+    boot configurations and never sets the property - while the NVIDIA driver
+    sets it on the external output, where it is useless.
+    """
+    return connector.split("-")[0].lower() in INTERNAL_TYPES
+
+
 def dedupe_and_sort(raws: list[RawOutput]) -> list[Monitor]:
     """Drop disconnected outputs, collapse mirrored ones, order deterministically.
 

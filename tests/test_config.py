@@ -243,3 +243,25 @@ def test_an_absent_or_empty_table_is_still_fine():
     assert loads("").dials == {}
     assert loads("[dials]\n").dials == {}
     assert loads("[defaults]\n").defaults.monitor == "HDMI-0"
+
+
+def test_monitor_accepts_every_selector_form():
+    for value in ("HDMI-0", "edid:AW3425DWM", "connector:eDP-1-1", "internal"):
+        cfg = loads(f'[defaults]\nmonitor = "{value}"\n')
+        assert cfg.defaults.monitor == value
+
+
+def test_unknown_monitor_prefix_is_a_config_error_in_defaults():
+    with pytest.raises(ConfigError, match="unknown monitor selector"):
+        loads('[defaults]\nmonitor = "foo:bar"\n')
+
+
+def test_unknown_monitor_prefix_is_a_config_error_on_a_dial():
+    # Per-Dial overrides must be validated too, not just defaults.
+    with pytest.raises(ConfigError, match="unknown monitor selector"):
+        loads('[dials."9"]\nmatch_class = "X"\nmonitor = "foo:bar"\n')
+
+
+def test_empty_edid_selector_is_a_config_error():
+    with pytest.raises(ConfigError, match="empty name"):
+        loads('[defaults]\nmonitor = "edid:"\n')
