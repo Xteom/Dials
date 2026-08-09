@@ -72,27 +72,18 @@ def _window_geometry(wid):
     return WindowOps(d, d.screen().root).geometry(wid)
 
 
-def _monitor_for(rect):
-    """Resolve which monitor a pixel rect sits on.
-
-    Keeping the whole resolution behind this seam means cli.py does not import
-    daemon's private _monitor_containing, and capture becomes testable with a
-    plain fake.
-    """
-    from Xlib import display
-    from dials.daemon import _monitor_containing
-    from dials.monitors import MonitorSource
-    d = display.Display()
-    src = MonitorSource(d, d.screen().root)
-    return _monitor_containing(rect, src.monitors(), src.root_rect())
-
-
 def _read_monitors():
-    """Return (monitors, root_rect) for the monitor-health line in `status`.
+    """Return (monitors, root_rect): one X read, shared by every caller that
+    needs "what is out there at all".
 
-    Separate from `_monitor_for` because that answers "which monitor is this
-    rect on" and this answers "what is out there at all" - `status` needs the
-    whole list to run every Dial's name through `pick`.
+    `status` runs every Dial's name through `pick` against this same list.
+    `capture` derives which monitor a rect sits on from it too, via
+    `dials.daemon._monitor_containing` - deliberately NOT a second seam that
+    opens its own `Display()` and walks RandR again. Two enumerations from two
+    connections used to answer "which monitor is this rect on" and "what is
+    out there" separately; if the layout changed between them, the first
+    monitor might not even be a member of the second list, and `selector_for`
+    would count a name collision over the wrong set.
     """
     from Xlib import display
     from dials.monitors import MonitorSource
@@ -134,7 +125,6 @@ class Deps:
     list_windows: callable = _list_windows
     active_window: callable = _active_window
     window_geometry: callable = _window_geometry
-    monitor_for: callable = _monitor_for
     monitors: callable = _read_monitors
     out: object = field(default_factory=lambda: sys.stdout)
 
@@ -144,7 +134,7 @@ class Deps:
 def _cmd_list(args, d: Deps) -> int:
     cfg = d.load()
     print(f"{'slot':<6} {'':<2} {'label':<22} {'class':<16} "
-          f"{'monitor':<10} {'rect':<26} focus-loss", file=d.out)
+          f"{'monitor':<18} {'rect':<26} focus-loss", file=d.out)
     for slot in keys.BINDABLE_SLOTS:
         dial = cfg.dial(slot)
         if dial is None:
@@ -152,8 +142,11 @@ def _cmd_list(args, d: Deps) -> int:
             continue
         glyph = icons.glyph_for(dial.match_class, dial.icon)
         rect = ("[" + ", ".join(f"{v:g}" for v in dial.rect) + "]")
+        # 18, not 10: "edid:AW3425DWM" is 14 chars and "connector:HDMI-1-0"
+        # is 18 - both selector forms this feature added are wider than a
+        # bare connector name, and every row in a migrated config uses one.
         print(f"{slot:<6} {glyph:<2} {dial.label:<22} {dial.match_class:<16} "
-              f"{dial.monitor:<10} {rect:<26} {dial.on_focus_loss}", file=d.out)
+              f"{dial.monitor:<18} {rect:<26} {dial.on_focus_loss}", file=d.out)
     return 0
 
 
@@ -189,6 +182,7 @@ def _cmd_capture(args, d: Deps) -> int:
         return 2
     from dataclasses import replace
     from dials.assign import derive_rect
+    from dials.daemon import _monitor_containing
     from dials.geometry import Rect
     from dials.windows import choose
 
@@ -203,12 +197,18 @@ def _cmd_capture(args, d: Deps) -> int:
         print(f"no window matching class {dial.match_class!r}", file=d.out)
         return 1
     rect = d.window_geometry(chosen.wid) or Rect(0, 0, 800, 600)
-    monitor = d.monitor_for(rect)
     try:
-        mons, _root = d.monitors()
+        mons, root = d.monitors()
     except Exception as exc:
         print(f"could not read the monitor list from X: {exc}", file=d.out)
         return 1
+    # One enumeration, not two: `monitor` is derived from the SAME list passed
+    # to `selector_for` below. Reading monitors twice from two X connections
+    # meant `monitor` and `mons` could come from different snapshots of the
+    # layout - and if it changed in between, `monitor` might not even be a
+    # member of `mons`, so the uniqueness check silently degraded to the bare
+    # connector name.
+    monitor = _monitor_containing(rect, mons, root)
     selector = monitors.selector_for(monitor, mons)
     if selector is None:
         # Same rule as the unreadable window list above: capture writes to the

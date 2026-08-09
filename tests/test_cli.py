@@ -10,10 +10,12 @@ from dials.windows import WindowInfo
 DEFAULT_MONITOR = Monitor(name="HDMI-0", rect=Rect(0, 0, 1920, 1080),
                           primary=True, crtc=1)
 
-# This machine in `system76-power graphics hybrid`: X is driven by modesetting
-# (Intel), and the NVIDIA-attached ultrawide arrives through PRIME as a sink
-# provider, so it is named HDMI-1-0 rather than the HDMI-0 it had under the
-# NVIDIA X driver.
+# This machine with Intel marked `boot_vga` by firmware: X makes the Intel
+# (modesetting) GPU primary, and the NVIDIA-attached ultrawide arrives through
+# PRIME as a secondary provider, so it is named HDMI-1-0 rather than the
+# HDMI-0 it had when NVIDIA was `boot_vga` and primary instead. Same physical
+# cable, same panel, both times - `system76-power graphics` read `hybrid` on
+# both boots and is not the trigger.
 HYBRID_MONITORS = [
     Monitor("HDMI-1-0", Rect(0, 0, 3440, 1440), primary=False, crtc=522),
     Monitor("eDP-1", Rect(488, 1440, 2560, 1440), primary=True, crtc=62),
@@ -67,7 +69,6 @@ def deps(dials=None, paused=False, windows=(), active=None,
         list_windows=lambda: list(windows),
         active_window=lambda: active,
         window_geometry=lambda wid: geometry,
-        monitor_for=lambda rect: monitor,
         # Injected in every test, not only the monitor-health ones: the real
         # default opens an X display, which would make the whole CLI suite pass
         # or fail depending on whether it ran under a desktop session.
@@ -229,11 +230,12 @@ def test_status_counts_bound_dials():
 def test_status_warns_when_a_dial_s_monitor_is_absent():
     """The regression that made 2026-08-07 mysterious.
 
-    Switching the box from `system76-power graphics nvidia` to `hybrid` renamed
-    every NVIDIA output (HDMI-0 -> HDMI-1-0), so pick() fell back to primary and
-    every Dial silently landed on the laptop panel. `dials status` reported
-    "3 bound" and nothing else, which is exactly the report that should have
-    named the problem.
+    Which GPU the firmware marks `boot_vga` between reboots flipped, so X made
+    a different GPU primary and renamed every NVIDIA output (HDMI-0 ->
+    HDMI-1-0). `system76-power graphics` read `hybrid` on both boots and was
+    never the trigger. pick() fell back to primary and every Dial silently
+    landed on the laptop panel. `dials status` reported "3 bound" and nothing
+    else, which is exactly the report that should have named the problem.
     """
     d, _, out = deps({"9": dial()})            # dial() is configured for HDMI-0
     d.monitors = lambda: (HYBRID_MONITORS, HYBRID_ROOT)
