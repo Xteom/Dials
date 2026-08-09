@@ -67,7 +67,7 @@ Geometry is stored as a monitor name plus fractions, never absolute pixels,
 because this machine's layout changes: `DP-1-1` was connected during one design
 probe and gone by the next. An absent monitor falls back to primary.
 
-`monitor` accepts three forms, checked in this order:
+`monitor` accepts four forms:
 
 ```toml
 monitor = "edid:AW3425DWM"     # the display's own EDID model name
@@ -81,6 +81,15 @@ they name the *display*, not the socket it happens to occupy this boot — see
 below for why that distinction turned out to matter. `dials status` lists the
 live connector and EDID name of every attached display, so the right value is
 read off, never guessed.
+
+You never have to type these by hand: `dials capture <slot>` (and binding a
+window from the curses grid) compute the value for you — `internal` when the
+target is uniquely the built-in panel, else `edid:NAME` when the name is
+unique among connected displays, else the bare connector as a last resort.
+If the display's identity cannot be read from X at that moment, `dials
+capture` **refuses and exits 1** instead of silently falling back to a
+connector name that might not survive the next reboot; re-run it once X is
+behaving again.
 
 ### If every Dial suddenly opens on the wrong screen
 
@@ -289,3 +298,10 @@ icon is confirmed to render — everything below is still **outstanding**:
 - **Tray tooltip.** With the tray running (`--tray`), hover the icon and
   confirm the tooltip text changes between "Dials live" (NumLock off) and
   "Dials dormant" (NumLock on) as you toggle NumLock.
+- **EDID placement, by an actual keypress.** Configure a Dial with
+  `edid:<name>` and press its numpad key; confirm the window lands on the
+  ultrawide. This is verified through `pick()`'s resolution logic against
+  live X and through `dials status` naming the right display, but not
+  through a real keypress — input injection to drive that keypress was
+  blocked by an environment safety classifier, and was correctly not worked
+  around.

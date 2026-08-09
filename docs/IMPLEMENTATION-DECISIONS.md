@@ -7,7 +7,9 @@ Other documents already exist and this one deliberately does not repeat them:
 | Document | Covers |
 | --- | --- |
 | `docs/superpowers/specs/2026-07-28-dials-design.md` | The **design** and its rationale, settled before any code |
+| `docs/superpowers/specs/2026-08-09-monitor-identity-design.md` | The **design** for naming a Dial's *display* rather than its connector, and why the connector rename bites |
 | `docs/superpowers/plans/2026-07-30-dials*.md` | The task breakdown and the code as planned |
+| `docs/superpowers/plans/2026-08-09-monitor-identity.md` | The task breakdown for the monitor-identity feature |
 | `docs/RETROSPECTIVE.md` | The **process** lessons and failure patterns |
 | `docs/OPEN-PROBLEMS.md` | What is still wrong, unconfirmed, or worked around |
 | `docs/FIREFOX-DIAL6.md` | Why the Firefox Dial's profile is tuned, and how |
@@ -530,7 +532,7 @@ adversarial reviewer and each was measured before being declined.
 
 ## 7. What still needs a human
 
-Four checks cannot be automated here and are listed in `README.md`:
+Five checks cannot be automated here and are listed in `README.md`:
 
 1. Press a Dial with **CapsLock on** — the regression guard for §1.1.
 2. **Physically hold** a Dial key — XTEST cannot reproduce server autorepeat, so the
@@ -539,6 +541,12 @@ Four checks cannot be automated here and are listed in `README.md`:
    not as *received*.
 4. Hover the tray icon — the state logic is exhaustively tested; the on-screen
    tooltip string was never screenshot-confirmed.
+5. Press a numpad key and watch a Dial actually land on the ultrawide by its
+   `edid:` name — EDID-based placement is verified through `pick()`'s
+   resolution logic against live X and through `dials status` naming the
+   right display, but not through a real keypress confirming the window
+   moves. Input injection to drive that keypress was blocked by an
+   environment safety classifier, and was correctly not worked around.
 
 Nothing in the *original* branch installed anything: no systemd unit enabled, no
 live config created, no process left running, because activating this takes over
