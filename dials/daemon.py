@@ -461,7 +461,12 @@ def _monitor_containing(rect: geometry.Rect, mons, root) -> geometry.Monitor:
     for m in mons:
         if m.primary:
             return m
-    return mons[0] if mons else geometry.Monitor("<root>", root, True, 0)
+    # identity_reliable=False: same sentinel as monitors._fallback, and for the
+    # same reason - there is no connector and no EDID behind "<root>", so
+    # selector_for must refuse to persist it rather than write a name that will
+    # never match anything again.
+    return mons[0] if mons else geometry.Monitor(
+        "<root>", root, True, 0, identity_reliable=False)
 
 
 def _spawn_confirm_dialog(request: OverwriteRequest) -> None:

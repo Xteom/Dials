@@ -1,3 +1,5 @@
+import pytest
+
 from dials.geometry import Monitor, Rect
 from dials.monitors import (
     MonitorSource, RawOutput, dedupe_and_sort, edid_name, is_internal,
@@ -209,9 +211,6 @@ def test_edid_name_handles_none_and_empty():
     assert edid_name(b"") is None
 
 
-import pytest
-
-
 def test_parse_selector_bare_string_is_a_connector():
     # Back-compat: every config written before this feature keeps its meaning.
     assert parse_selector("HDMI-0") == ("connector", "HDMI-0")
@@ -357,6 +356,7 @@ def test_two_internal_panels_are_ambiguous():
     a = RawOutput("eDP-1", 62, 0, 0, 2560, 1440, True)
     b = RawOutput("eDP-2", 63, 2560, 0, 2560, 1440, False)
     chosen, reason = pick("internal", dedupe_and_sort([a, b]), ROOT)
+    assert chosen.name == "eDP-1"             # fell back to primary
     assert "more than one internal" in reason
 
 
@@ -455,3 +455,23 @@ def test_selector_for_refuses_unreliable_identity_even_on_internal_connector():
     panel = RawOutput("eDP-1", 62, 0, 0, 2560, 1440, True, edid_failed=True)
     mons = dedupe_and_sort([panel])
     assert selector_for(mons[0], mons) is None
+
+
+def test_selector_for_refuses_the_root_sentinel():
+    # `<root>` is the synthetic destination pick() falls back to when there is
+    # no usable monitor at all - the case the refusal gate most obviously
+    # exists for. It has no connector and no EDID behind it, so persisting it
+    # would produce a config value that can never match anything again and
+    # would warn on every keypress.
+    root = Monitor("<root>", ROOT, True, 0, identity_reliable=False)
+    assert selector_for(root, [root]) is None
+
+
+def test_pick_falls_back_to_a_root_sentinel_with_unreliable_identity():
+    # Same fact, from the other side: pick()'s own fallback must construct the
+    # sentinel with identity_reliable=False so callers that write config never
+    # have to special-case the string "<root>".
+    chosen, reason = pick("HDMI-0", [], ROOT)
+    assert chosen.name == "<root>"
+    assert chosen.identity_reliable is False
+    assert selector_for(chosen, [chosen]) is None

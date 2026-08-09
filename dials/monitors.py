@@ -191,7 +191,11 @@ def _fallback(
         m = monitors[0]
         return m, f"{problem} and no primary; using first {m.name!r}"
     return (
-        Monitor(name="<root>", rect=root_rect, primary=True, crtc=0),
+        # identity_reliable=False, not merely a magic name: `<root>` is a
+        # synthetic stand-in with no connector and no EDID behind it, and
+        # selector_for's refusal gate keys off this flag, not off the string.
+        Monitor(name="<root>", rect=root_rect, primary=True, crtc=0,
+                identity_reliable=False),
         f"{problem} and no usable monitors; using root box",
     )
 

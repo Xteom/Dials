@@ -409,6 +409,27 @@ def test_arm_assign_refuses_when_the_identity_could_not_be_read():
     assert notes.mentions("identity")
 
 
+def test_arm_assign_refuses_when_no_monitors_are_usable():
+    """`_monitor_containing` falls back to a synthetic `<root>` sentinel when
+    RandR reports nothing usable at all - the case the refusal gate most
+    obviously exists for, since `<root>` has no connector and no EDID behind
+    it and would otherwise be written verbatim into the config."""
+
+    class NoMonitors(FakeMonitors):
+        def monitors(self):
+            return []
+
+    notes = Notes()
+    ops = FakeOps(windows=[win(5)], active=5)
+    d = daemon(ops, notifier=notes)
+    d.monitors = NoMonitors()
+
+    d.arm_assign()
+
+    assert d.assign.armed is False
+    assert notes.mentions("identity")
+
+
 # ---- focus-loss hiding --------------------------------------------------
 
 def test_hide_dial_hides_when_another_window_takes_focus():
