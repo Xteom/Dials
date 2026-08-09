@@ -373,3 +373,29 @@ def test_an_invalid_selector_falls_back_rather_than_raising():
     chosen, reason = pick("foo:bar", mons, ROOT)
     assert chosen.name == "eDP-1-1"
     assert "invalid monitor selector" in reason
+
+
+class _FakeProp:
+    def __init__(self, value):
+        self.value = value
+
+
+def test_read_edid_distinguishes_absent_from_failed(monkeypatch):
+    """The tri-state, at the boundary that creates it."""
+    src = MonitorSource(display=None, root=None, reader=lambda: [])
+
+    from Xlib.ext import randr
+
+    monkeypatch.setattr(randr, "get_output_property",
+                        lambda *a, **k: _FakeProp(list(EDID_ULTRAWIDE)))
+    assert src._read_edid(1, 2) == (EDID_ULTRAWIDE, False)
+
+    monkeypatch.setattr(randr, "get_output_property",
+                        lambda *a, **k: _FakeProp([]))
+    assert src._read_edid(1, 2) == (None, False)      # no EDID, not a failure
+
+    def _boom(*a, **k):
+        raise OSError("X went away")
+
+    monkeypatch.setattr(randr, "get_output_property", _boom)
+    assert src._read_edid(1, 2) == (None, True)       # failure, not absence
