@@ -175,23 +175,36 @@ following `clip`'s established style.
 ```
 KeyPress(keycode, state == 0)
   -> keys.slot_for(keycode)                     "9"
-  -> config.dial("9")                           Dial(match_class="spotify", ...)
+  -> config.dial("9")                           Dial(match_class="Spotify", ...)
   -> windows.find(dial.match_class)             window id | None
-       None  -> launcher.arm_confirm(dial)      notify, grab Return+KP_Enter for 5s
+       None  -> launcher.arm_confirm(dial)      notify, grab Return for 5s
        found -> windows.read_state(win)
                   HIDDEN       -> SHOW   apply geometry + hints, then activate
-                  not FOCUSED  -> RAISE  activate only
+                  not FOCUSED  -> RAISE  apply hints (+geometry if pinned), activate
                   FOCUSED      -> HIDE   WM_CHANGE_STATE -> IconicState
 ```
 
 ### State machine
 
-| Window state | Action | Geometry re-applied |
-| --- | --- | --- |
-| not found | confirm-then-launch | — |
-| `_NET_WM_STATE_HIDDEN` (minimized) | apply geometry + hints, activate | yes |
-| visible, **not the active window** | activate only | only if `pin_geometry` |
-| visible and **is the active window** | iconify | — |
+| Window state | Action | Geometry re-applied | Hints re-applied |
+| --- | --- | --- | --- |
+| not found | confirm-then-launch | — | — |
+| `_NET_WM_STATE_HIDDEN` (minimized) | apply geometry + hints, activate | yes | yes |
+| visible, **not the active window** | apply hints, activate | only if `pin_geometry` | **yes** |
+| visible and **is the active window** | iconify | — | — |
+
+Hints are re-applied on a RAISE as well as a SHOW, and deliberately are **not**
+gated on `pin_geometry`: that setting governs position, and the hints are window
+properties. The distinction is load-bearing. A window that was already visible the
+first time the daemon saw it never goes through SHOW — every press on it is a RAISE
+— so gating hints on SHOW left such a window still in the switcher, and stranded on
+whichever workspace it started on, no matter how often its Dial was pressed.
+
+`_NET_WM_STATE_ABOVE` is also explicitly **removed** when `on_focus_loss` is not
+`"above"`, rather than merely not added. `_NET_WM_STATE` messages are add/remove,
+never a whole-state assignment, so an add-only implementation cannot undo itself:
+changing a Dial from `"above"` to `"normal"` would otherwise leave its window
+pinned on top until the application restarted.
 
 Three states rather than a strict two-state toggle, because a Dial with `on_focus_loss = "normal"`
 can be buried: pressing its key while it is buried must raise it, not hide it. A strict toggle would
@@ -274,9 +287,15 @@ This is the one behavior in the design that no probe covers, because XTEST canno
 reproduce server-generated autorepeat — it needs a physically held key, so it is an explicit
 first-run smoke test rather than a claim.
 
-Geometry is **not** re-applied on a plain raise, so hand-nudging a window is not undone on every
-keypress. `dials capture <slot>` saves the current position instead; `pin_geometry = true` opts a
-Dial into strict enforcement.
+`pin_geometry` decides whether geometry is re-applied on a plain raise. It ships **on**.
+
+The original reasoning was that leaving it off protects a hand-nudged window from being snapped back
+on the next keypress. In use that was the wrong trade: geometry is applied unconditionally on SHOW,
+i.e. when a window returns from minimised, but a window that was already visible the first time the
+daemon saw it never goes through SHOW — so with this off, no Dial ever placed it and it simply kept
+whatever size the application chose. A panel that does not place its window is not a panel. The
+accepted cost is the original concern: a hand-nudge is undone on the next press, and
+`dials capture <slot>` is how to make one permanent.
 
 ### Focus-loss behavior
 
@@ -326,12 +345,45 @@ Two consequences of applying the rule uniformly, stated so they are not read as 
   same thing clicking on the dialog would do, and it is left consistent rather than special-cased.
 - The launch-confirmation notification does **not** take focus, so it never disturbs a showing Dial.
 
-`_NET_WM_STATE_STICKY`, `SKIP_TASKBAR` and `SKIP_PAGER` are applied to every Dial unconditionally:
-Dials must be reachable from any workspace and must never appear in alt-tab.
+`SKIP_TASKBAR` and `SKIP_PAGER` are applied to every Dial unconditionally: a Dial must never appear
+in alt-tab.
 
 **Accepted trade (confirmed by the user):** per the mutter source above, `skip_taskbar` is the same
 flag the window list uses, so Dials get no taskbar entry either. Alt-tab exclusion is the
 requirement; taskbar presence was optional.
+
+### Workspaces: current-desktop placement, not sticky
+
+**`_NET_WM_STATE_STICKY` was the original mechanism and has been replaced.** The requirement was
+*"these windows should always be in all workspaces"*, and sticky delivers that literally — which
+turned out to be the wrong reading of it.
+
+Sticky satisfies *"reachable from any workspace"* by making the window **present on every**
+workspace. Those are different wishes, and the difference is visible the moment you change
+workspace: a four-finger swipe carried every Dial along, so switching away from Spotify showed you
+Spotify again. Verified before the change — both Dials reported `_NET_WM_DESKTOP = 0xFFFFFFFF`
+across three workspaces.
+
+So the show path now sends `_NET_WM_DESKTOP` with the value of `_NET_CURRENT_DESKTOP` instead. A
+Dial appears on whichever workspace you are on, and exists on no other. Pressing its key is still
+how you reach it from anywhere, which was the actual requirement. Guake offers exactly this choice,
+which is some evidence it is what people want from a dropdown.
+
+Three details that are easy to get wrong:
+
+- **`STICKY` must be actively REMOVED, not merely no longer added.** `_NET_WM_STATE` is
+  add/remove and never a whole-state assignment, so any window made sticky by an earlier version
+  stays sticky forever otherwise. Same trap as `ABOVE`.
+- **It is gated on the same condition as the hints**, i.e. SHOW *and* RAISE. A window that was
+  already visible never goes through SHOW, so gating on SHOW would leave it stranded on whichever
+  workspace it happened to start on.
+- **An unreadable `_NET_CURRENT_DESKTOP` is a no-op, not a guess.** Leaving a window where it is
+  beats moving it to a workspace chosen at random. Note that workspace `0` is a legitimate index,
+  so the guard is `is None` and not a truthiness test — the kind of defaulting bug this project has
+  already had once.
+
+Verified live: the Spotify Dial went from `sticky=True, _NET_WM_DESKTOP=4294967295` to
+`sticky=False, _NET_WM_DESKTOP=0` on the current workspace.
 
 ## Monitors
 
@@ -509,11 +561,17 @@ in memory by the running daemon and never written to disk.
 monitor       = "HDMI-0"              # ultrawide; falls back to primary if unplugged
 rect          = [0.0, 0.0, 0.5, 1.0]  # x, y, w, h as fractions of the monitor
 on_focus_loss = "hide"                # normal | above | hide
-pin_geometry  = false
+pin_geometry  = true                  # see "Geometry" - ships on
 
 [dials."9"]
 label         = "Spotify"
-match_class   = "spotify"             # WM_CLASS *class* field (second field)
+match_class   = "Spotify"             # WM_CLASS *class* field (second field)
+                                      # CASE MATTERS. Spotify's WM_CLASS is
+                                      # ("spotify", "Spotify"): instance lower,
+                                      # class capitalised. Getting this wrong
+                                      # matches nothing, and the Dial then
+                                      # reports the app as not running and offers
+                                      # to launch a second copy of it.
 # must carry the scale flag, or the min-width workaround from spotify_width is lost
 launch        = "/snap/bin/spotify --force-device-scale-factor=0.7"
 icon          = ""                   # nerd font glyph; auto-guessed from .desktop if omitted
@@ -1006,6 +1064,119 @@ restores stock numpad behavior with NumLock off; nothing persists past process e
 Firefox panel profile, if created, is removed with `firefox -P` or by deleting its profile
 directory.
 
+## Pop Shell interaction
+
+**`_NET_WM_STATE_SKIP_TASKBAR` is necessary but not sufficient on this desktop.** Dial windows kept
+appearing in alt-tab and in the workspace overview despite carrying it. The cause is not the hint,
+and not when the hint is set — it is `pop-shell@system76.com`, which is enabled here.
+
+GNOME Shell 42.9 itself honours the hint in both places, read from its own sources:
+
+```js
+workspace.js:1376   _isOverviewWindow(window) { return !window.skip_taskbar; }
+altTab.js:53        .filter((w, i, a) => !w.skip_taskbar && a.indexOf(w) == i);
+```
+
+Alt-tab rebuilds that list every time the switcher opens, so a "the hint was set too late" theory
+does not survive contact with the source — it was checked and discarded.
+
+Pop Shell then **monkey-patches both**, to keep minimise-to-tray applications reachable:
+
+```js
+Workspace.prototype._isOverviewWindow = function (win) {
+    return (is_valid_minimize_to_tray(meta_win, ext) || default_isoverviewwindow_ws(win));
+};
+WindowSwitcherPopup.prototype._getWindowList = /* likewise */
+```
+
+`is_valid_minimize_to_tray` returns true for any non-override-redirect NORMAL or UTILITY window that
+has `skip_taskbar`, a non-null `WM_CLASS`, and is not `Gjs`/`Gnome-shell` — which describes every
+Dial window exactly. So the hint that is supposed to hide a Dial is the very thing that makes Pop
+Shell show it.
+
+**This also explains Guake.** Guake has identical window properties to a Dial and stays out of
+alt-tab, which looked like evidence for the timing theory. It is nothing of the sort: Pop Shell ships
+a hardcoded allowlist and Guake is on it —
+
+```js
+var SKIPTASKBAR_EXCEPTIONS = [
+    { class: "Conky" }, { class: "gjs" }, { class: "Guake" },
+    { class: "Com.github.amezin.ddterm" }, { class: "plank" },
+];
+```
+
+### The per-class rules Pop Shell documents do not work — upstream bug
+
+`is_valid_minimize_to_tray` consults `cfg.skiptaskbar_shall_hide(meta_win)`, which matches the window
+against rules in `~/.config/pop-shell/config.json`'s `skiptaskbarhidden`. That is the obvious,
+targeted hook, and it **cannot work in this version**:
+
+```js
+// config.js
+reload() {
+    const conf = Config.from_config();
+    if (conf.tag === 0) {
+        let c = conf.value;
+        this.float = c.float;
+        this.log_on_focus = c.log_on_focus;     // skiptaskbarhidden is never assigned
+    }
+}
+```
+
+`ext.conf` starts as `new Config.Config()`, whose constructor sets `skiptaskbarhidden = []`, and
+`reload()` is the only thing that ever repopulates it. The JSON *is* parsed — `from_json` returns the
+whole object — and then two of its three fields are copied out and the third is dropped. So
+`this.skiptaskbarhidden` is permanently empty, and `skiptaskbar_shall_hide` only ever consults the
+hardcoded `SKIPTASKBAR_EXCEPTIONS`.
+
+That is also the real reason Guake escapes and nothing user-configured can: not timing, not the
+allowlist being special, but a two-line omission that makes the documented hook dead code.
+
+An earlier revision of this section recommended those rules. They were written, verified to *match*
+by replicating the predicate in Python, and still had no effect — because the predicate they were
+verified against is never given them. Verifying a rule matches is not the same as verifying it is
+consulted.
+
+### The fix
+
+```sh
+gsettings set org.gnome.shell.extensions.pop-shell show-skip-taskbar false
+```
+
+This is the supported switch, it is user-level and reversible, and Pop Shell watches the key
+(`extension.js`, `case 'show-skip-taskbar'`) so it **applies immediately with no reload**. With the
+override uninstalled, stock GNOME behaviour returns and `SKIP_TASKBAR` — which Dials already sets —
+excludes the window from both the switcher and the overview.
+
+**The trade, and it is real:** this disables the feature for *every* application, including genuine
+tray-minimised ones, which is the case it exists to serve. On this machine that appears to cost
+nothing (Slack unmaps its window entirely rather than setting the flag), but it is a system-wide
+setting, not a Dials-scoped one.
+
+The inert `skiptaskbarhidden` rules are left in place: they cost nothing, they express the intent, and
+they become correct the day the upstream bug is fixed. They are recorded as inert in
+`docs/OPEN-PROBLEMS.md` so nobody concludes from their presence that they do something.
+
+### Reloading GNOME Shell on this install
+
+Not needed for the fix above, but needed for anything that *is* read at extension-enable time.
+
+**`Alt+F2` then `r` does not work here.** It is the standard way to reload GNOME Shell on X11 and it
+**fails silently**: `/usr/libexec/mutter-restart-helper` is not shipped by this Pop!_OS install, so
+mutter logs `Failed to start restart helper` and keeps running the old process. A *successful* re-exec
+also preserves the Shell's PID and start time, so neither is evidence either way — the journal line is.
+This cost a full round trip of "I restarted but it still shows".
+
+Use `gnome-extensions disable pop-shell@system76.com && gnome-extensions enable
+pop-shell@system76.com`, or reboot.
+
+`install.sh` checks for the rules and prints instructions, but deliberately does not edit the file: it
+belongs to another extension, and a malformed `config.json` would take Pop Shell's tiling down with
+it.
+
+Anything that adds a Dial for a new application needs a matching rule here. That coupling is the
+cost of this approach and is why it is written down rather than left in a commit message.
+
 ## Deferred
 
 - **Runtime diagnostics in `dials status`** — grab conflicts, monitor fallbacks and geometry
@@ -1026,6 +1197,8 @@ directory.
 - **Real bitmap app icons** in the TUI via the Kitty graphics protocol.
 - **Alt-tab-hidden but taskbar-visible** — impossible with EWMH hints alone, since mutter reads one
   flag for both. Would need a GNOME Shell extension.
+- **Alt-tab and overview exclusion needs a Pop Shell config entry, not just EWMH hints.** Solved;
+  see *Pop Shell interaction* below. `SKIP_TASKBAR` is necessary and not sufficient on this desktop.
 - **Event-driven NumLock tracking** — needs an XKB binding python-xlib does not provide; revisit if
   the 1 Hz tray timer ever proves visible, or if `ctypes` becomes acceptable.
 - **Wayland / COSMIC support** — would mean moving key handling to `keyd` at the evdev layer and

@@ -191,9 +191,16 @@ class Daemon:
 
             if panels.reapply_geometry(action, dial.pin_geometry):
                 self.ops.apply_geometry(chosen.wid, self._rect_for(dial))
-            if action == panels.SHOW:
+            if panels.reapply_hints(action):
                 self.ops.apply_hints(chosen.wid,
                                      above=(dial.on_focus_loss == "above"))
+                # Bring the window to THIS workspace rather than making it sticky.
+                # Sticky would satisfy "reachable from any workspace" by putting
+                # the Dial on every workspace, so switching workspace dragged all
+                # of them along. Same condition as the hints: a window that was
+                # already visible never goes through SHOW, so gating this on SHOW
+                # would leave it stranded on whichever workspace it started on.
+                self.ops.place_on_current_desktop(chosen.wid)
             self._tracker(dial).activating(chosen.wid)
             self.ops.activate(chosen.wid, timestamp)
             return action
@@ -297,11 +304,17 @@ class Daemon:
             mons = self.monitors.monitors()
             root = self.monitors.root_rect()
             monitor = _monitor_containing(win_rect, mons, root)
+            selector = monitors_mod.selector_for(monitor, mons)
+            if selector is None:
+                self._notify("Assign mode",
+                             f"could not read {monitor.name}'s identity; "
+                             "not binding")
+                return
             self.assign.arm(Capture(
                 wid=active,
                 wm_class=info.wm_class,
                 label=self.ops.window_name(active),
-                monitor=monitor.name,
+                monitor=selector,
                 rect=derive_rect(win_rect, monitor),
                 at=self._clock(),
             ))
@@ -401,6 +414,7 @@ class Daemon:
             self.ops.apply_geometry(chosen.wid, self._rect_for(dial))
             self.ops.apply_hints(chosen.wid,
                                  above=(dial.on_focus_loss == "above"))
+            self.ops.place_on_current_desktop(chosen.wid)
             self._tracker(dial).activating(chosen.wid)
             self.ops.activate(chosen.wid, self._confirm_timestamp)
         except Exception:
@@ -447,7 +461,12 @@ def _monitor_containing(rect: geometry.Rect, mons, root) -> geometry.Monitor:
     for m in mons:
         if m.primary:
             return m
-    return mons[0] if mons else geometry.Monitor("<root>", root, True, 0)
+    # identity_reliable=False: same sentinel as monitors._fallback, and for the
+    # same reason - there is no connector and no EDID behind "<root>", so
+    # selector_for must refuse to persist it rather than write a name that will
+    # never match anything again.
+    return mons[0] if mons else geometry.Monitor(
+        "<root>", root, True, 0, identity_reliable=False)
 
 
 def _spawn_confirm_dialog(request: OverwriteRequest) -> None:

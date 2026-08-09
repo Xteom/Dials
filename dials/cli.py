@@ -11,7 +11,7 @@ import signal
 import sys
 from dataclasses import dataclass, field
 
-from dials import icons, keys
+from dials import icons, keys, monitors
 from dials.config import (
     ConfigError, config_path, load as load_config, reference_path, state_dir,
 )
@@ -72,19 +72,24 @@ def _window_geometry(wid):
     return WindowOps(d, d.screen().root).geometry(wid)
 
 
-def _monitor_for(rect):
-    """Resolve which monitor a pixel rect sits on.
+def _read_monitors():
+    """Return (monitors, root_rect): one X read, shared by every caller that
+    needs "what is out there at all".
 
-    Keeping the whole resolution behind this seam means cli.py does not import
-    daemon's private _monitor_containing, and capture becomes testable with a
-    plain fake.
+    `status` runs every Dial's name through `pick` against this same list.
+    `capture` derives which monitor a rect sits on from it too, via
+    `dials.daemon._monitor_containing` - deliberately NOT a second seam that
+    opens its own `Display()` and walks RandR again. Two enumerations from two
+    connections used to answer "which monitor is this rect on" and "what is
+    out there" separately; if the layout changed between them, the first
+    monitor might not even be a member of the second list, and `selector_for`
+    would count a name collision over the wrong set.
     """
     from Xlib import display
-    from dials.daemon import _monitor_containing
     from dials.monitors import MonitorSource
     d = display.Display()
     src = MonitorSource(d, d.screen().root)
-    return _monitor_containing(rect, src.monitors(), src.root_rect())
+    return src.monitors(), src.root_rect()
 
 
 def _upsert(path, dial):
@@ -120,7 +125,7 @@ class Deps:
     list_windows: callable = _list_windows
     active_window: callable = _active_window
     window_geometry: callable = _window_geometry
-    monitor_for: callable = _monitor_for
+    monitors: callable = _read_monitors
     out: object = field(default_factory=lambda: sys.stdout)
 
 
@@ -129,7 +134,7 @@ class Deps:
 def _cmd_list(args, d: Deps) -> int:
     cfg = d.load()
     print(f"{'slot':<6} {'':<2} {'label':<22} {'class':<16} "
-          f"{'monitor':<10} {'rect':<26} focus-loss", file=d.out)
+          f"{'monitor':<18} {'rect':<26} focus-loss", file=d.out)
     for slot in keys.BINDABLE_SLOTS:
         dial = cfg.dial(slot)
         if dial is None:
@@ -137,8 +142,11 @@ def _cmd_list(args, d: Deps) -> int:
             continue
         glyph = icons.glyph_for(dial.match_class, dial.icon)
         rect = ("[" + ", ".join(f"{v:g}" for v in dial.rect) + "]")
+        # 18, not 10: "edid:AW3425DWM" is 14 chars and "connector:HDMI-1-0"
+        # is 18 - both selector forms this feature added are wider than a
+        # bare connector name, and every row in a migrated config uses one.
         print(f"{slot:<6} {glyph:<2} {dial.label:<22} {dial.match_class:<16} "
-              f"{dial.monitor:<10} {rect:<26} {dial.on_focus_loss}", file=d.out)
+              f"{dial.monitor:<18} {rect:<26} {dial.on_focus_loss}", file=d.out)
     return 0
 
 
@@ -174,6 +182,7 @@ def _cmd_capture(args, d: Deps) -> int:
         return 2
     from dataclasses import replace
     from dials.assign import derive_rect
+    from dials.daemon import _monitor_containing
     from dials.geometry import Rect
     from dials.windows import choose
 
@@ -188,12 +197,32 @@ def _cmd_capture(args, d: Deps) -> int:
         print(f"no window matching class {dial.match_class!r}", file=d.out)
         return 1
     rect = d.window_geometry(chosen.wid) or Rect(0, 0, 800, 600)
-    monitor = d.monitor_for(rect)
-    updated = replace(dial, monitor=monitor.name,
-                      rect=derive_rect(rect, monitor))
+    try:
+        mons, root = d.monitors()
+    except Exception as exc:
+        print(f"could not read the monitor list from X: {exc}", file=d.out)
+        return 1
+    # One enumeration, not two: `monitor` is derived from the SAME list passed
+    # to `selector_for` below. Reading monitors twice from two X connections
+    # meant `monitor` and `mons` could come from different snapshots of the
+    # layout - and if it changed in between, `monitor` might not even be a
+    # member of `mons`, so the uniqueness check silently degraded to the bare
+    # connector name.
+    monitor = _monitor_containing(rect, mons, root)
+    selector = monitors.selector_for(monitor, mons)
+    if selector is None:
+        # Same rule as the unreadable window list above: capture writes to the
+        # config, so guessing has a persistent cost. Writing a bare connector
+        # name here would silently swap a rename-proof selector for the exact
+        # fragile one this feature exists to retire.
+        print(f"could not read {monitor.name}'s identity from X; refusing to "
+              f"write a connector name that may not survive a reboot",
+              file=d.out)
+        return 1
+    updated = replace(dial, monitor=selector, rect=derive_rect(rect, monitor))
     d.upsert(config_path(), updated)
     d.signal_daemon()
-    print(f"captured {args.slot}: {monitor.name} "
+    print(f"captured {args.slot}: {selector} "
           f"{[round(v, 3) for v in updated.rect]}", file=d.out)
     return 0
 
@@ -235,6 +264,22 @@ def _cmd_reload(args, d: Deps) -> int:
     return 0 if ok else 1
 
 
+def _monitor_label(m) -> str:
+    """`HDMI-0 (AW3425DWM)` - the connector, plus what to actually type.
+
+    Discoverability is the point: an `edid:` selector is useless if the name it
+    needs can only be found with xrandr and a hex dump.
+    """
+    tags = []
+    if m.display_name:
+        tags.append(m.display_name)
+    if monitors.is_internal(m.name):
+        tags.append("internal")
+    if not m.identity_reliable:
+        tags.append("identity unreadable")
+    return f"{m.name} ({', '.join(tags)})" if tags else m.name
+
+
 def _cmd_status(args, d: Deps) -> int:
     try:
         cfg = d.load()
@@ -247,6 +292,32 @@ def _cmd_status(args, d: Deps) -> int:
           file=d.out)
     if problem:
         print(f"config:    ERROR {problem}", file=d.out)
+        return 0
+
+    # Monitor health. `pick` already computes a one-line reason for landing
+    # somewhere other than the configured output, and its docstring says that
+    # reason exists for this command - but nothing surfaced it until a graphics
+    # mode switch renamed every output and each Dial quietly moved to the
+    # laptop panel while `status` reported nothing but a count.
+    #
+    # Read failures degrade to one line rather than propagating: `dials status`
+    # has to answer over ssh, where there is no display to open.
+    try:
+        mons, root = d.monitors()
+    except Exception as exc:
+        print(f"monitors:  unreadable ({exc})", file=d.out)
+        return 0
+
+    warnings = [
+        (slot, reason)
+        for slot in sorted(cfg.dials)
+        for _, reason in [monitors.pick(cfg.dials[slot].monitor, mons, root)]
+        if reason
+    ]
+    names = ", ".join(_monitor_label(m) for m in mons) or "none"
+    print(f"monitors:  {names}", file=d.out)
+    for slot, reason in warnings:
+        print(f"monitor:   WARNING slot {slot}: {reason}", file=d.out)
     return 0
 
 

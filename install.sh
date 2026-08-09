@@ -44,10 +44,33 @@ if [ -e "$LIVE_CONFIG" ]; then
   echo "  keeping existing $LIVE_CONFIG"
 else
   cp "$REPO/config/config.reference.toml" "$LIVE_CONFIG"
-  # Strip the reference header so the live file is not labelled "NOT LIVE".
-  sed -i '/^# REFERENCE COPY/,/^# Refresh this snapshot/d' "$LIVE_CONFIG"
+  # Strip the whole reference-only header so the live file is not labelled "NOT
+  # LIVE" and does not carry instructions for refreshing the *other* file. The
+  # range has to run to the end of that paragraph: stopping at "Refresh this
+  # snapshot" left the "WARNING: that command REGENERATES this file" lines
+  # behind, which in the live config referred to a file it is not.
+  sed -i '/^# REFERENCE COPY/,/^# them with `git checkout/d' "$LIVE_CONFIG"
+  # ...and the separator line that paragraph left behind at the very top.
+  sed -i '1{/^#[[:space:]]*$/d}' "$LIVE_CONFIG"
   echo "  wrote $LIVE_CONFIG"
 fi
+
+echo "==> installing tray icons"
+# The tray looks these up by NAME through the GTK icon theme, so they have to
+# live in a theme directory: a path inside the repo is not discoverable, and
+# would break the moment the checkout moved. hicolor is the fallback theme every
+# other theme inherits from, so this works whichever icon theme is active.
+ICON_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/icons/hicolor/scalable/apps"
+mkdir -p "$ICON_DIR"
+install -m 644 "$REPO"/icons/dials-shell*.svg "$ICON_DIR/"
+# Refresh the cache only if one exists. A user hicolor dir usually has no
+# index.theme and therefore no cache, in which case GTK reads the directory
+# directly and this would be a no-op that prints a confusing error.
+HICOLOR="${XDG_DATA_HOME:-$HOME/.local/share}/icons/hicolor"
+if [ -f "$HICOLOR/index.theme" ] && command -v gtk-update-icon-cache >/dev/null 2>&1; then
+  gtk-update-icon-cache -q -f -t "$HICOLOR" || true
+fi
+echo "  installed $(ls "$REPO"/icons/dials-shell*.svg | wc -l) icons into $ICON_DIR"
 
 echo "==> installing systemd units"
 mkdir -p "$UNIT_DIR"
@@ -61,6 +84,37 @@ if [ "$WANT_TRAY" = 1 ]; then
   echo "  tray enabled"
 else
   echo "  tray NOT enabled (re-run with --tray to enable it)"
+fi
+
+echo "==> checking Pop Shell's skip-taskbar override"
+# Advisory only, never fatal, and it changes nothing by itself.
+#
+# _NET_WM_STATE_SKIP_TASKBAR is necessary but not sufficient here. GNOME Shell
+# honours it in both the overview and alt-tab, but pop-shell monkey-patches both
+# to keep minimise-to-tray apps reachable, and its predicate matches any NORMAL
+# window with skip_taskbar and a real WM_CLASS - i.e. every Dial window.
+#
+# The per-class `skiptaskbarhidden` rules pop-shell documents CANNOT exempt them:
+# its Config.reload() copies out `float` and `log_on_focus` and silently drops
+# `skiptaskbarhidden`, so that list is permanently empty and only the hardcoded
+# SKIPTASKBAR_EXCEPTIONS ever apply. That is an upstream bug - do NOT send anyone
+# to edit config.json, which is what an earlier version of this check did. The
+# gsettings key below is the switch that works, and pop-shell watches it, so it
+# takes effect with no reload. See the design doc's "Pop Shell interaction".
+if gnome-extensions list --enabled 2>/dev/null | grep -q "pop-shell@system76.com"; then
+  if [ "$(gsettings get org.gnome.shell.extensions.pop-shell show-skip-taskbar 2>/dev/null)" = "true" ]; then
+    echo "  NOTE: pop-shell is enabled with show-skip-taskbar=true, so it will show"
+    echo "        your Dials in alt-tab and the workspace overview even though they"
+    echo "        set SKIP_TASKBAR. To stop that:"
+    echo "          gsettings set org.gnome.shell.extensions.pop-shell \\"
+    echo "            show-skip-taskbar false"
+    echo "        Applies immediately, no reload. Trade: apps that genuinely"
+    echo "        minimise to the tray are then hidden from those views too."
+  else
+    echo "  show-skip-taskbar is already false; Dials stay out of alt-tab"
+  fi
+else
+  echo "  pop-shell not enabled; nothing to do"
 fi
 
 echo "==> status"

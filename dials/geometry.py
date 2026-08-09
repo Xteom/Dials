@@ -37,6 +37,13 @@ class Monitor:
     rect: Rect
     primary: bool
     crtc: int
+    #: The display's own EDID model name, when it reports one. None for a
+    #: panel that carries no 0xFC descriptor AND for one whose EDID could not
+    #: be read - `identity_reliable` is what separates those.
+    display_name: str | None = None
+    #: False only when the EDID read RAISED. Degrading is fine when placing a
+    #: window and wrong when writing config, so the write path checks this.
+    identity_reliable: bool = True
 
 
 def resolve(

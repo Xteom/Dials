@@ -62,6 +62,43 @@ def move(grid, slot: str, dx: int, dy: int) -> str:
     return grid[nr][nc]
 
 
+def resolve_bind(
+    cursor: str, cfg: Config, wm_class: str, label: str, rect, mons, root,
+) -> tuple[Dial | None, str]:
+    """Turn a picked window into a Dial to persist, or a refusal.
+
+    Pure given (rect, mons, root): all X access stays in `run`, so the bind
+    decision is testable without a terminal - the same split the module
+    docstring promises for `move` and `cell_label`.
+
+    Mirrors `dials/cli.py`'s capture path and the daemon's assign mode: the
+    monitor is derived from THIS SAME `mons` list, then run through
+    `selector_for`, which returns None when the identity could not be read.
+    None here means REFUSE - the caller must write nothing and say why. A
+    bare connector name persisted from this path would be exactly the
+    fragile value this feature exists to retire, and until this function
+    existed, `b` was the one write path that still did that unconditionally.
+    """
+    from dials.assign import derive_rect
+    from dials.daemon import _monitor_containing
+    from dials.monitors import selector_for
+
+    monitor = _monitor_containing(rect, mons, root)
+    selector = selector_for(monitor, mons)
+    if selector is None:
+        return None, (
+            f"could not read {monitor.name}'s identity from X; not binding "
+            f"{cursor} - a connector name may not survive a reboot"
+        )
+    dial = Dial(
+        slot=cursor, label=label, match_class=wm_class, launch=None, icon="",
+        monitor=selector, rect=derive_rect(rect, monitor),
+        on_focus_loss=cfg.defaults.on_focus_loss,
+        pin_geometry=cfg.defaults.pin_geometry,
+    )
+    return dial, f"bound {cursor} -> {dial.label}"
+
+
 def detail_lines(dial: Dial | None) -> list[str]:
     if dial is None:
         return ["(unbound)", "", "press b to bind a window to this slot"]
@@ -185,27 +222,21 @@ def run(config: Config) -> int:
                 picked = pick_window(stdscr)
                 if picked:
                     info, ops = picked
-                    from dials.assign import derive_rect
-                    from dials.daemon import _monitor_containing
                     from dials.geometry import Rect
                     from dials.monitors import MonitorSource
                     from Xlib import display as _display
                     dsp = _display.Display()
-                    mons = MonitorSource(dsp, dsp.screen().root)
+                    src = MonitorSource(dsp, dsp.screen().root)
                     rect = ops.geometry(info.wid) or Rect(0, 0, 800, 600)
-                    monitor = _monitor_containing(rect, mons.monitors(),
-                                                  mons.root_rect())
-                    dial = Dial(
-                        slot=cursor,
-                        label=ops.window_name(info.wid) or info.wm_class,
-                        match_class=info.wm_class, launch=None, icon="",
-                        monitor=monitor.name, rect=derive_rect(rect, monitor),
-                        on_focus_loss=cfg.defaults.on_focus_loss,
-                        pin_geometry=cfg.defaults.pin_geometry,
+                    dial, note = resolve_bind(
+                        cursor, cfg, info.wm_class,
+                        ops.window_name(info.wid) or info.wm_class,
+                        rect, src.monitors(), src.root_rect(),
                     )
-                    cfg = upsert_dial(config_path(), dial)
-                    _signal_daemon()
-                    message = f"bound {cursor} -> {dial.label}"
+                    if dial is not None:
+                        cfg = upsert_dial(config_path(), dial)
+                        _signal_daemon()
+                    message = note
             elif key == ord("d") and cfg.dial(cursor):
                 cfg = remove_dial(config_path(), cursor)
                 _signal_daemon()

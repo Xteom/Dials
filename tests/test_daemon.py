@@ -55,6 +55,9 @@ class FakeOps:
     def apply_hints(self, wid, above):
         self.calls.append(("hints", wid, above))
 
+    def place_on_current_desktop(self, wid):
+        self.calls.append(("desktop", wid))
+
     def activate(self, wid, timestamp):
         self.calls.append(("activate", wid, timestamp))
         self.active = wid
@@ -171,8 +174,9 @@ def test_hidden_window_is_shown_with_geometry_and_hints():
     d = daemon(ops)
     assert d.handle_slot("9", timestamp=222) == SHOW
     kinds = [c[0] for c in ops.calls]
-    assert kinds == ["geometry", "hints", "activate"]
-    # Geometry and hints BEFORE activation, so focus lands last.
+    # "desktop" = placed on the CURRENT workspace, which replaced STICKY.
+    assert kinds == ["geometry", "hints", "desktop", "activate"]
+    # Geometry, hints and workspace BEFORE activation, so focus lands last.
     assert ("activate", 5, 222) in ops.calls
 
 
@@ -201,6 +205,61 @@ pin_geometry = true
     ops = FakeOps(windows=[win(5)], active=999)
     daemon(ops, config=cfg).handle_slot("9", timestamp=1)
     assert any(c[0] == "geometry" for c in ops.calls)
+
+
+def test_hints_are_applied_on_a_plain_raise_not_only_on_show():
+    """A window that is already visible must still be made a panel.
+
+    This is the alt-tab regression. Such a window never goes through SHOW - the
+    daemon only ever RAISEs it - so gating apply_hints on SHOW meant it was
+    never made sticky and never left the taskbar and switcher. Asserted here at
+    the call site and not only on `panels.reapply_hints`, because reverting the
+    daemon to `if action == panels.SHOW:` left the whole suite green.
+    """
+    ops = FakeOps(windows=[win(5)], active=999)          # visible, not active
+    assert daemon(ops).handle_slot("9", timestamp=1) == RAISE
+    assert ("hints", 5, False) in ops.calls
+
+
+def test_hints_are_applied_on_a_raise_regardless_of_pin_geometry():
+    """pin_geometry governs position only; it must not gate window properties."""
+    cfg = loads("""
+[dials."9"]
+match_class = "spotify"
+pin_geometry = false
+""")
+    ops = FakeOps(windows=[win(5)], active=999)
+    daemon(ops, config=cfg).handle_slot("9", timestamp=1)
+    assert any(c[0] == "hints" for c in ops.calls)
+    assert not any(c[0] == "geometry" for c in ops.calls)
+
+
+def test_hide_does_not_apply_hints():
+    """Nothing to assert on a window that is about to be iconified."""
+    ops = FakeOps(windows=[win(5)], active=5)
+    assert daemon(ops).handle_slot("9", timestamp=1) == HIDE
+    assert not any(c[0] == "hints" for c in ops.calls)
+
+
+def test_a_raise_moves_the_window_to_the_current_workspace():
+    """The replacement for STICKY, asserted at the CALL SITE.
+
+    Sticky met "reachable from any workspace" by putting the Dial on every
+    workspace, so a workspace switch dragged all of them along. Placing it on the
+    current workspace instead has to happen on a RAISE too, not only a SHOW: a
+    window that was already visible never goes through SHOW, so it would otherwise
+    stay stranded wherever it started.
+    """
+    ops = FakeOps(windows=[win(5)], active=999)          # visible, not active
+    assert daemon(ops).handle_slot("9", timestamp=1) == RAISE
+    assert ("desktop", 5) in ops.calls
+
+
+def test_hide_does_not_move_the_window_between_workspaces():
+    """Moving a window as you put it away would shuffle workspaces invisibly."""
+    ops = FakeOps(windows=[win(5)], active=5)
+    assert daemon(ops).handle_slot("9", timestamp=1) == HIDE
+    assert not any(c[0] == "desktop" for c in ops.calls)
 
 
 def test_active_window_is_iconified():
@@ -303,6 +362,72 @@ def test_arm_assign_with_an_unreadable_window_list_says_so_and_does_not_arm():
     assert d.assign.armed is False
     assert notes.mentions("could not read")
     assert not notes.mentions("not manageable")
+
+
+def test_arm_assign_captures_an_edid_selector_not_a_connector():
+    """Assign mode is the OTHER path that writes a monitor into the config.
+
+    It persisted `monitor.name`, so a window bound during one boot wrote a
+    connector name that the next boot could rename out from under it.
+    """
+    named = Monitor("HDMI-0", Rect(0, 0, 3440, 1440), primary=True, crtc=63,
+                    display_name="AW3425DWM")
+
+    class NamedMonitors(FakeMonitors):
+        def monitors(self):
+            return [named]
+
+    ops = FakeOps(windows=[win(5)], active=5)
+    d = daemon(ops)
+    d.monitors = NamedMonitors()
+
+    d.arm_assign()
+    assert d.assign.armed is True
+
+    bound = d.assign.resolve("9", existing=None)
+    assert bound.monitor == "edid:AW3425DWM"
+
+
+def test_arm_assign_refuses_when_the_identity_could_not_be_read():
+    """Same rule as the unreadable window list above: binding writes to the
+    config, so a guess outlives the moment X misbehaved."""
+    unreadable = Monitor("HDMI-0", Rect(0, 0, 3440, 1440), primary=True,
+                         crtc=63, identity_reliable=False)
+
+    class BrokenMonitors(FakeMonitors):
+        def monitors(self):
+            return [unreadable]
+
+    notes = Notes()
+    ops = FakeOps(windows=[win(5)], active=5)
+    d = daemon(ops, notifier=notes)
+    d.monitors = BrokenMonitors()
+
+    d.arm_assign()
+
+    assert d.assign.armed is False
+    assert notes.mentions("identity")
+
+
+def test_arm_assign_refuses_when_no_monitors_are_usable():
+    """`_monitor_containing` falls back to a synthetic `<root>` sentinel when
+    RandR reports nothing usable at all - the case the refusal gate most
+    obviously exists for, since `<root>` has no connector and no EDID behind
+    it and would otherwise be written verbatim into the config."""
+
+    class NoMonitors(FakeMonitors):
+        def monitors(self):
+            return []
+
+    notes = Notes()
+    ops = FakeOps(windows=[win(5)], active=5)
+    d = daemon(ops, notifier=notes)
+    d.monitors = NoMonitors()
+
+    d.arm_assign()
+
+    assert d.assign.armed is False
+    assert notes.mentions("identity")
 
 
 # ---- focus-loss hiding --------------------------------------------------
@@ -724,8 +849,10 @@ def test_a_launched_window_denied_focus_is_still_adopted():
     d.on_client_list_changed()
 
     kinds = [c[0] for c in ops.calls]
-    assert kinds == ["geometry", "hints", "activate"]
+    assert kinds == ["geometry", "hints", "desktop", "activate"]
     assert ("activate", 11, 4242) in ops.calls
+    assert ("desktop", 11) in ops.calls, \
+        "a launched window must land on the workspace you are on, not workspace 0"
     assert d.launcher.pending is None, "the waiter must stop waiting"
 
 

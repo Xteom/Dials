@@ -2,18 +2,26 @@
 
 ## What this document is for
 
-Three documents already exist and this one deliberately does not repeat them:
+Other documents already exist and this one deliberately does not repeat them:
 
 | Document | Covers |
 | --- | --- |
 | `docs/superpowers/specs/2026-07-28-dials-design.md` | The **design** and its rationale, settled before any code |
+| `docs/superpowers/specs/2026-08-09-monitor-identity-design.md` | The **design** for naming a Dial's *display* rather than its connector, and why the connector rename bites |
 | `docs/superpowers/plans/2026-07-30-dials*.md` | The task breakdown and the code as planned |
+| `docs/superpowers/plans/2026-08-09-monitor-identity.md` | The task breakdown for the monitor-identity feature |
 | `docs/RETROSPECTIVE.md` | The **process** lessons and failure patterns |
+| `docs/OPEN-PROBLEMS.md` | What is still wrong, unconfirmed, or worked around |
+| `docs/FIREFOX-DIAL6.md` | Why the Firefox Dial's profile is tuned, and how |
 
 What none of them records is the set of decisions forced by **executing** the
 plan: what measurement contradicted, what was changed and why, what was
 deliberately *not* changed, and what each choice implies for anyone editing this
 code later. That is this document.
+
+Section 8 covers the changes made after first install, once the thing was in daily
+use. Those are the decisions the plan could not have anticipated, because they
+came from watching it run.
 
 Where a decision is already argued in the spec, it is named here only with its
 consequence, not re-argued.
@@ -273,7 +281,7 @@ worse failure than "exits too eagerly".
 
 Geometry, monitor selection, the action table, the focus state machine, window
 selection and config validation are pure and tested without a display. This is why
-382 tests run in under half a second and why the subtle logic could be
+400 tests run in under half a second and why the subtle logic could be
 mutation-tested at all.
 
 **Implication.** A handler that reaches for X directly instead of its injected seam
@@ -524,7 +532,7 @@ adversarial reviewer and each was measured before being declined.
 
 ## 7. What still needs a human
 
-Four checks cannot be automated here and are listed in `README.md`:
+Five checks cannot be automated here and are listed in `README.md`:
 
 1. Press a Dial with **CapsLock on** — the regression guard for §1.1.
 2. **Physically hold** a Dial key — XTEST cannot reproduce server autorepeat, so the
@@ -533,7 +541,247 @@ Four checks cannot be automated here and are listed in `README.md`:
    not as *received*.
 4. Hover the tray icon — the state logic is exhaustively tested; the on-screen
    tooltip string was never screenshot-confirmed.
+5. Press a numpad key and watch a Dial actually land on the ultrawide by its
+   `edid:` name — EDID-based placement is verified through `pick()`'s
+   resolution logic against live X and through `dials status` naming the
+   right display, but not through a real keypress confirming the window
+   moves. Input injection to drive that keypress was blocked by an
+   environment safety classifier, and was correctly not worked around.
 
-Nothing in this branch installs anything: no systemd unit enabled, no live config
-created, no process left running. `./install.sh` (with `--tray` for the indicator)
-is a deliberate user action, because activating this takes over 15 keys.
+Nothing in the *original* branch installed anything: no systemd unit enabled, no
+live config created, no process left running, because activating this takes over
+15 keys. It has since been installed deliberately with `./install.sh --tray`, and
+section 8 records what daily use then revealed.
+
+---
+
+## 8. Decisions from first use
+
+Everything above came from building the thing. This section came from running it,
+which found four defects no test could have — three of them because the tests
+asserted the design rather than the outcome.
+
+### 8.1 `match_class` is case-sensitive, and getting it wrong is silent
+
+Spotify's `WM_CLASS` is `("spotify", "Spotify")`: instance lowercase, class
+capitalised. The shipped config matched lowercase `spotify` against the *class*
+field, so it matched nothing — and the Dial then reported Spotify as not running
+while it was on screen, offering to launch a second copy.
+
+**Implication.** A wrong `match_class` is indistinguishable from "the app is
+closed", which is the most confusing possible failure: the feature appears to work
+and simply disagrees with reality. `xprop WM_CLASS` on the real window is the only
+way to be sure, and the second field is the one that matters.
+
+### 8.2 An already-visible window never went through SHOW, so it was never set up
+
+The single root cause behind two separate complaints — "it opens at full screen"
+and "it still shows in alt-tab".
+
+Geometry and hints were both applied on SHOW. But SHOW only happens when a window
+comes back from minimised, and a window that was *already visible* the first time
+the daemon saw it never takes that path — every press on it is a RAISE or a HIDE.
+So such a window was never placed and never made into a panel, no matter how many
+times its Dial was pressed.
+
+Two different fixes, because the two settings are not the same kind of thing:
+
+- **Geometry** is position, so it stays under `pin_geometry` — but that now ships
+  **on**. Leaving it off was protecting a hand-nudged window from being snapped
+  back, which turned out to be the wrong trade: a panel that never places its
+  window is not a panel. The nudge concern is real and is now the accepted cost,
+  with `dials capture <slot>` as the way to make one permanent.
+- **Hints** are window properties, so they are re-applied on SHOW *and* RAISE and
+  are deliberately not gated on `pin_geometry` at all. A test asserts
+  `reapply_hints` takes only the action, because adding a `pin_geometry` parameter
+  would silently stop excluding pinned-off Dials from the switcher.
+
+**Implication.** "Applied on show" is not the same as "applied", and the gap is
+invisible in tests that start from a minimised window — which every test did.
+
+### 8.3 `_NET_WM_STATE` is add/remove, so add-only code cannot undo itself
+
+`apply_hints` only ever *added* `_NET_WM_STATE_ABOVE`. Changing a Dial from
+`on_focus_loss = "above"` to `"normal"` therefore left its window pinned on top
+until the application restarted, with the config silently disagreeing with the
+screen. It now sends an explicit REMOVE.
+
+**Implication.** For any add/remove protocol, "set to false" has to be written as
+an operation, not as the absence of one. The old test — "ABOVE is not among the
+atoms sent" — was satisfied by the broken behaviour; the replacement asserts the
+action byte.
+
+### 8.4 A predicate test is not a call-site test
+
+Both 8.2 fixes were first covered only by tests on the pure predicate in
+`panels.py`. Reverting `daemon.py` to the buggy `if action == panels.SHOW:` left
+**all 389 tests green**. This is the same vacuous-coverage shape already recorded
+in `RETROSPECTIVE.md`, recurring in new code.
+
+**Implication.** When a fix is one line in a caller and one function in a pure
+module, the caller is where the bug can come back. Mutation-test the call site,
+not just the predicate. Three daemon-level tests now fail if that line regresses.
+
+### 8.5 The tray icon is generated, and fitted by measurement
+
+The first shell was a scallop, which is the wrong animal — a Dial is a conch. The
+replacement is a logarithmic spiral, which cannot be hand-authored: the constants
+live in `icons/generate.py` and the SVG is output.
+
+Three things were learned the hard way and are pinned by comments or tests:
+
+- **gdk-pixbuf identifies an image by sniffing its leading bytes**, so a comment
+  long enough to push `<svg` out of that window makes the icon fail to load as
+  "unrecognised format" — a broken image in the panel with nothing wrong in any
+  log. Measured: an 11-byte leading comment loads, a ~470-byte one does not.
+  `tests/test_tray.py` asserts `<svg ` is at byte 0.
+- **A flat spiral has a circular silhouette**, and at 22px the silhouette is all
+  you get, so it read as a disc. The coil is rotated and squashed on one axis to
+  give it a conch's spindle profile.
+- **The icon must be fitted, not positioned.** It first filled ~62% of the
+  viewBox and looked shrunken beside every other indicator. `_fit` measures the
+  drawn bounding box — including half of each stroke width, which a naive path
+  bbox misses, and omitting it clipped the widest whorl — and emits the transform.
+  Resizing is now one constant.
+
+### 8.6 Two Dials may share one rect
+
+Spotify and Slack both occupy the right half of the ultrawide. That is a supported
+pattern, not a collision: one screen region, two keys, one window up at a time.
+Nothing special-cases a Dial appearing over another, because showing one is an
+ordinary focus change — which is why this needed no code at all.
+
+### 8.7 The alt-tab and overview problem was never ours
+
+Two rounds of hint fixes went into making Dial windows disappear from alt-tab and
+from the workspace overview, and neither was the cause. Reading GNOME Shell 42.9's
+own extracted sources settled it in minutes, after a day of theorising:
+
+```js
+workspace.js:1376   _isOverviewWindow(window) { return !window.skip_taskbar; }
+altTab.js:53        .filter((w, i, a) => !w.skip_taskbar && a.indexOf(w) == i);
+```
+
+Shell honours the hint in both places, and alt-tab rebuilds its list on every open
+— so the "hint was applied too late to be noticed" theory, which was mine and
+which I had already written into the spec as the likely answer, was simply wrong.
+
+`pop-shell` monkey-patches both functions so that minimise-to-tray applications
+stay reachable, and its `is_valid_minimize_to_tray` predicate matches *any*
+non-override-redirect NORMAL window with `skip_taskbar` and a real `WM_CLASS`.
+That is a precise description of a Dial window. **The hint meant to hide a Dial is
+what made Pop Shell show it.**
+
+And Guake — whose identical properties had looked like the strongest evidence for
+the timing theory — is simply on Pop Shell's hardcoded `SKIPTASKBAR_EXCEPTIONS`
+allowlist, alongside Conky and plank.
+
+**First decision, and it was wrong.** Three rules in
+`~/.config/pop-shell/config.json`'s `skiptaskbarhidden`, one per Dial class,
+preferred over the global `show-skip-taskbar` toggle because that toggle breaks the
+feature for every genuine tray application. Targeted beats global — except the
+targeted hook does not work.
+
+**`skiptaskbarhidden` is dead code in this version of Pop Shell.** `ext.conf` starts
+as `new Config.Config()`, whose constructor sets it to `[]`, and `Config.reload()` —
+the only thing that ever repopulates it — copies out two of the parsed object's three
+fields and drops that one:
+
+```js
+this.float = c.float;
+this.log_on_focus = c.log_on_focus;     // skiptaskbarhidden never assigned
+```
+
+So `skiptaskbar_shall_hide()` only ever sees the hardcoded `SKIPTASKBAR_EXCEPTIONS`.
+That, not hint timing and not anything about allowlists being special, is the real
+reason Guake escapes and nothing user-configured can.
+
+**Actual decision.** `gsettings set org.gnome.shell.extensions.pop-shell
+show-skip-taskbar false`. Supported, user-level, reversible, and Pop Shell watches
+the key, so it applies with no reload. The trade that made it second choice is real
+and now accepted: it is system-wide, so genuine tray-minimising applications lose
+their overview and alt-tab entry too. On this machine that appears to cost nothing —
+Slack unmaps its window rather than setting the flag.
+
+**Implication, method — and this is the reusable part.** The rules were written and
+then *verified to match*, by replicating `skiptaskbar_shall_hide()` in Python against
+the live windows, with Guake as a control. They matched. They did nothing.
+**Verifying that a rule matches is not verifying that the rule is consulted.** The
+replication faithfully reproduced the predicate and inherited its unstated
+assumption: that `this.skiptaskbarhidden` holds what the file holds. Worse,
+`reload()` had already been read earlier in the same session, for the question "does
+it watch the file?", without noticing what it silently omits — the answer to the next
+question was on screen and went unread.
+
+**Implication, method.** Two speculative fixes shipped before anyone read the 60
+lines of JavaScript that decide the behaviour. Both fixes were independently
+correct and worth keeping, which is what made the guessing feel productive. When
+the question is "why does this desktop do X", the desktop's source is on disk:
+`gresource extract` on `libgnome-shell.so` and the extensions in
+`/usr/share/gnome-shell/extensions/` are readable and authoritative. Read them
+first.
+
+**And then the fix appeared not to work, for a reason that was nothing to do with
+it.** `Alt+F2` then `r` — the standard way to reload GNOME Shell on X11 — **fails
+silently on this machine**: `/usr/libexec/mutter-restart-helper` is not shipped by
+this Pop!_OS install, so mutter logs `Failed to start restart helper` and carries
+on with the old process. The correct config sat unread on disk while the symptom
+persisted. `gnome-extensions disable … && enable …` needs no helper binary and is
+what the docs now say.
+
+Two things made that hard to see, and both are worth remembering:
+
+- **The obvious check was useless.** A *successful* Shell re-exec preserves the PID
+  and the process start time, so "the PID is unchanged" is not evidence the restart
+  failed — and neither is the converse. The journal line is the only evidence.
+- **Two `gsettings` keys, one of them imaginary.** The first lookup used
+  `show-skiptaskbar`, which does not exist, and `gsettings get` answered `No such
+  key` — which reads like "the feature is absent" rather than "you typed the wrong
+  name". The real key is `show-skip-taskbar`, and its value was `true` all along.
+  Its value was never checked until the fix appeared to fail, which is one round
+  trip later than it should have been.
+
+### 8.8 Sticky was the wrong reading of "always in all workspaces"
+
+The original requirement was *"this windows should always be in all workspaces"*,
+and `_NET_WM_STATE_STICKY` implements that literally: the window reports
+`_NET_WM_DESKTOP = 0xFFFFFFFF` and is present on every workspace. It shipped that
+way and satisfied the sentence exactly.
+
+It was still wrong, and the symptom showed it: a four-finger swipe switches
+workspace, so switching away from Spotify showed you Spotify again — the Dials
+followed. **"Reachable from any workspace" and "present on every workspace" are
+different wishes**, and sticky grants the second in order to get the first.
+
+**Decision.** Send `_NET_WM_DESKTOP` with the value of `_NET_CURRENT_DESKTOP` on
+the same SHOW/RAISE condition as the hints, and remove `STICKY`. A Dial now appears
+on whichever workspace you are on and exists on no other; pressing its key is still
+how you reach it from anywhere, which was the actual requirement.
+
+**Implication.** Three details had to be right, and each is a trap this project has
+hit before in another form:
+
+- `STICKY` is **actively removed**, not merely no longer added — otherwise every
+  window made sticky by the previous version stays sticky forever. Identical to the
+  `ABOVE` bug in §8.3, found the same day, which is why it was anticipated here
+  rather than discovered.
+- It is gated on SHOW **and** RAISE, for the reason in §8.2: an already-visible
+  window never goes through SHOW, so it would have stayed stranded on whatever
+  workspace it started on.
+- Workspace `0` is a real index, so the unreadable-property guard is `is None` and
+  not a truthiness test. `if not idx` would have silently skipped the most common
+  workspace on the machine.
+
+Both halves were mutation-tested before being believed: removing the call site
+fails two daemon tests, and reverting to add-only sticky handling fails one
+`WindowOps` test.
+
+### 8.9 Known rough edge: an app that minimises to the tray reads as "not running"
+
+Flatpak Slack unmaps its window and drops out of `_NET_CLIENT_LIST` when it
+minimises to the system tray. `list_windows()` correctly does not see it, so the
+Dial reports "not running" and offers to launch. Confirming happens to work, since
+Slack is single-instance and re-running it restores the window — but the message
+is wrong. Left as-is: distinguishing "closed" from "hidden in a tray" needs a
+per-application notion of liveness that this design does not have, and the
+consequence is a misleading sentence rather than a broken action.

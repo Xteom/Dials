@@ -1,6 +1,8 @@
 import pytest
 
-from dials.panels import HIDE, LAUNCH, RAISE, SHOW, decide, reapply_geometry
+from dials.panels import (
+    HIDE, LAUNCH, RAISE, SHOW, decide, reapply_geometry, reapply_hints,
+)
 from dials.panels import (
     ACTIVATING, ACTIVATION_TIMEOUT, ACTIVE, HIDE, INACTIVE, FocusTracker,
 )
@@ -43,6 +45,35 @@ def test_pin_geometry_opts_a_dial_into_strict_enforcement_on_raise():
 def test_geometry_is_never_applied_on_hide_or_launch():
     for action in (HIDE, LAUNCH):
         assert reapply_geometry(action, pin_geometry=True) is False
+
+
+def test_hints_are_applied_on_raise_not_only_on_show():
+    """The regression this exists for.
+
+    A window that was already visible when the daemon first saw it never goes
+    through SHOW - every press is a RAISE. Gating hints on SHOW meant such a
+    window never became sticky and never left the taskbar/switcher, which is
+    what the Firefox Dial did: it kept appearing in alt-tab forever.
+    """
+    assert reapply_hints(RAISE) is True
+    assert reapply_hints(SHOW) is True
+
+
+def test_hints_do_not_depend_on_pin_geometry():
+    """pin_geometry is about position; the hints are window properties.
+
+    Taking a single argument is the guard: if `reapply_hints` ever grows a
+    pin_geometry parameter, a Dial with pin off would silently stop being
+    excluded from the switcher.
+    """
+    import inspect
+    assert list(inspect.signature(reapply_hints).parameters) == ["action"]
+
+
+def test_hints_are_never_applied_on_hide_or_launch():
+    # HIDE is about to iconify the window and LAUNCH has no window yet.
+    for action in (HIDE, LAUNCH):
+        assert reapply_hints(action) is False
 
 
 WIN = 0x600001

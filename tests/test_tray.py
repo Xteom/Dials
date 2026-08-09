@@ -1,9 +1,13 @@
+from pathlib import Path
+
 import pytest
 
 from dials.tray import (
     DORMANT, ICON_NAMES, LIVE, PAUSED, POLL_INTERVAL_MS, TOOLTIPS,
-    _daemon_running, icon_state, numlock_on,
+    _daemon_running, _verify_icons, icon_state, numlock_on,
 )
+
+ICON_SOURCE_DIR = Path(__file__).resolve().parent.parent / "icons"
 
 
 @pytest.mark.parametrize("running,paused,numlock,expected", [
@@ -31,6 +35,57 @@ def test_every_state_has_an_icon_and_a_tooltip():
 def test_tooltips_explain_why_the_layer_is_inert():
     assert "NumLock" in TOOLTIPS[DORMANT]
     assert "paused" in TOOLTIPS[PAUSED].lower()
+
+
+def test_every_state_uses_a_project_icon_not_a_theme_icon():
+    """The icons ship with Dials, so every name must be one of ours.
+
+    Guards against drifting back to a stock name like `input-keyboard`: those
+    resolve on this machine but are a keyboard, not the shell the project is
+    named for, and they vary by icon theme.
+    """
+    for state in (LIVE, DORMANT, PAUSED):
+        assert ICON_NAMES[state].startswith("dials-shell")
+
+
+def test_every_icon_name_has_a_file_to_install():
+    """A name with no file behind it installs cleanly and renders as broken."""
+    for state in (LIVE, DORMANT, PAUSED):
+        assert (ICON_SOURCE_DIR / f"{ICON_NAMES[state]}.svg").is_file()
+
+
+def test_icon_files_open_with_the_svg_element_on_the_first_line():
+    """gdk-pixbuf recognises a file by sniffing its leading bytes.
+
+    A comment long enough to push `<svg` past that window makes the icon fail to
+    load with "couldn't recognize the image file format" - which presents as a
+    broken icon in the panel with nothing wrong in any log. Measured: an 11-byte
+    leading comment loads, the ~470-byte documentation block these files used to
+    carry does not. So the documentation lives inside the root element and this
+    test pins the constraint.
+    """
+    for path in sorted(ICON_SOURCE_DIR.glob("dials-shell*.svg")):
+        head = path.read_bytes()[:5]
+        assert head == b"<svg ", f"{path.name} starts with {head!r}, not '<svg '"
+
+
+def test_verify_icons_reports_missing_ones_rather_than_failing_silently():
+    class FakeTheme:
+        def __init__(self, present): self.present = present
+        def has_icon(self, name): return name in self.present
+
+    class FakeGtk:
+        def __init__(self, present): self._t = FakeTheme(present)
+        class IconTheme:  # replaced per-instance below
+            pass
+
+    gtk = FakeGtk(set())
+    gtk.IconTheme = type("IT", (), {"get_default": staticmethod(lambda: gtk._t)})
+    assert sorted(_verify_icons(gtk)) == sorted(ICON_NAMES.values())
+
+    gtk2 = FakeGtk(set(ICON_NAMES.values()))
+    gtk2.IconTheme = type("IT", (), {"get_default": staticmethod(lambda: gtk2._t)})
+    assert _verify_icons(gtk2) == []
 
 
 def test_poll_interval_is_one_second():

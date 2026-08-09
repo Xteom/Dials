@@ -33,10 +33,19 @@ POLL_INTERVAL_MS = 1000
 
 _NUMLOCK_LED_BIT = 0x2
 
+#: Project icons, installed by install.sh into
+#: ~/.local/share/icons/hicolor/scalable/apps/ and looked up by name through the
+#: GTK icon theme. A scallop shell, after the One Piece Dials the project is
+#: named for; the LIVE one is amber ("charged") and the other two are grey, so
+#: the top bar answers "are my Dials live?" by colour rather than by shape.
+#:
+#: These are NOT theme-provided names: if install.sh has not run, the lookup
+#: fails and the panel shows a broken-image placeholder. `_verify_icons` reports
+#: that on stderr at startup instead of leaving it to be guessed at.
 ICON_NAMES = {
-    LIVE: "input-keyboard",
-    DORMANT: "input-keyboard-symbolic",
-    PAUSED: "action-unavailable-symbolic",
+    LIVE: "dials-shell",
+    DORMANT: "dials-shell-dormant",
+    PAUSED: "dials-shell-paused",
 }
 
 TOOLTIPS = {
@@ -44,6 +53,28 @@ TOOLTIPS = {
     DORMANT: "Dials dormant - NumLock is on, the numpad types digits",
     PAUSED: "Dials paused - run `dials resume` to re-enable",
 }
+
+
+def _verify_icons(gtk) -> list[str]:
+    """Report any project icon the GTK theme cannot find. Returns the missing.
+
+    Reported rather than silently tolerated, because a missing icon renders as a
+    broken-image placeholder in the top bar - which reads as "Dials crashed"
+    rather than "an icon file is not installed". The usual cause is running the
+    tray without install.sh having copied `icons/` into ~/.local/share/icons, or
+    having copied them without refreshing the icon cache.
+
+    `gtk` is passed in rather than imported so this stays callable from a test
+    without pulling GTK into the module's import graph, which the daemon's
+    import-graph guard forbids.
+    """
+    theme = gtk.IconTheme.get_default()
+    missing = [name for name in ICON_NAMES.values() if not theme.has_icon(name)]
+    if missing:
+        print(f"dials-tray: the icon theme has no {', '.join(missing)}. Run "
+              f"install.sh to install icons/, or the top bar will show a broken "
+              f"image instead of the shell.", file=sys.stderr)
+    return missing
 
 
 def icon_state(running: bool, paused: bool, numlock_is_on: bool) -> str:
@@ -159,6 +190,7 @@ def main() -> int:
     from dials.config import state_dir
 
     d = xdisplay.Display()
+    _verify_icons(Gtk)
     icon = Gtk.StatusIcon()
     icon.set_visible(True)
     state = {"current": None}

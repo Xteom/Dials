@@ -1,7 +1,8 @@
 import pytest
 
-from dials.config import Dial
-from dials.tui import GRID, cell_label, detail_lines, move
+from dials.config import Config, Defaults, Dial
+from dials.geometry import Monitor, Rect
+from dials.tui import GRID, cell_label, detail_lines, move, resolve_bind
 
 
 def dial(slot="9"):
@@ -108,3 +109,34 @@ def test_detail_lines_include_every_editable_field():
 
 def test_detail_lines_for_an_unbound_slot():
     assert any("unbound" in line.lower() for line in detail_lines(None))
+
+
+#: This is finding CRITICAL-1 walking back in: the `b` key used to build a
+#: Dial with `monitor=monitor.name` directly, with no `selector_for` and no
+#: refusal - the one write path that still persisted a bare connector name.
+_CFG = Config(defaults=Defaults(), dials={})
+
+
+def test_bind_writes_an_edid_selector_not_a_connector():
+    named = Monitor("HDMI-0", Rect(0, 0, 3440, 1440), primary=False, crtc=63,
+                    display_name="AW3425DWM")
+    rect = Rect(100, 100, 800, 600)
+    dial, note = resolve_bind("9", _CFG, "spotify", "Spotify", rect,
+                              [named], named.rect)
+    assert dial is not None
+    assert dial.monitor == "edid:AW3425DWM"
+    assert dial.slot == "9" and dial.match_class == "spotify"
+    assert "bound" in note.lower()
+
+
+def test_bind_refuses_when_the_identity_could_not_be_read():
+    """None from selector_for means REFUSE: nothing gets written, and the
+    cursor's slot stays unbound rather than gaining a fragile connector name."""
+    unreadable = Monitor("HDMI-0", Rect(0, 0, 3440, 1440), primary=False,
+                         crtc=63, identity_reliable=False)
+    rect = Rect(100, 100, 800, 600)
+    dial, note = resolve_bind("9", _CFG, "spotify", "Spotify", rect,
+                              [unreadable], unreadable.rect)
+    assert dial is None
+    assert "identity" in note.lower()
+    assert "9" in note
