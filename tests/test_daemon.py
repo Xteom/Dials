@@ -364,6 +364,51 @@ def test_arm_assign_with_an_unreadable_window_list_says_so_and_does_not_arm():
     assert not notes.mentions("not manageable")
 
 
+def test_arm_assign_captures_an_edid_selector_not_a_connector():
+    """Assign mode is the OTHER path that writes a monitor into the config.
+
+    It persisted `monitor.name`, so a window bound during one boot wrote a
+    connector name that the next boot could rename out from under it.
+    """
+    named = Monitor("HDMI-0", Rect(0, 0, 3440, 1440), primary=True, crtc=63,
+                    display_name="AW3425DWM")
+
+    class NamedMonitors(FakeMonitors):
+        def monitors(self):
+            return [named]
+
+    ops = FakeOps(windows=[win(5)], active=5)
+    d = daemon(ops)
+    d.monitors = NamedMonitors()
+
+    d.arm_assign()
+    assert d.assign.armed is True
+
+    bound = d.assign.resolve("9", existing=None)
+    assert bound.monitor == "edid:AW3425DWM"
+
+
+def test_arm_assign_refuses_when_the_identity_could_not_be_read():
+    """Same rule as the unreadable window list above: binding writes to the
+    config, so a guess outlives the moment X misbehaved."""
+    unreadable = Monitor("HDMI-0", Rect(0, 0, 3440, 1440), primary=True,
+                         crtc=63, identity_reliable=False)
+
+    class BrokenMonitors(FakeMonitors):
+        def monitors(self):
+            return [unreadable]
+
+    notes = Notes()
+    ops = FakeOps(windows=[win(5)], active=5)
+    d = daemon(ops, notifier=notes)
+    d.monitors = BrokenMonitors()
+
+    d.arm_assign()
+
+    assert d.assign.armed is False
+    assert notes.mentions("identity")
+
+
 # ---- focus-loss hiding --------------------------------------------------
 
 def test_hide_dial_hides_when_another_window_takes_focus():

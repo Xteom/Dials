@@ -319,3 +319,46 @@ def test_unknown_command_exits_nonzero():
     d, _, _ = deps({})
     with pytest.raises(SystemExit):
         main(["frobnicate"], deps=d)
+
+
+#: A window matching the "9" dial's class, used by the three tests below so
+#: capture actually finds a window to act on rather than short-circuiting on
+#: "no window matching class" before it ever reaches the selector logic.
+_SPOTIFY_WINDOW = WindowInfo(wid=42, wm_class="spotify",
+                             wtype="_NET_WM_WINDOW_TYPE_NORMAL",
+                             override_redirect=False, transient_for=None,
+                             appeared=0.0)
+
+
+def test_capture_writes_an_edid_selector_not_a_connector():
+    """Capture is how this bug walks back in. It writes to config."""
+    named = Monitor("HDMI-0", Rect(0, 0, 3440, 1440), primary=False, crtc=63,
+                    display_name="AW3425DWM")
+    d, state, _ = deps({"9": dial()}, windows=(_SPOTIFY_WINDOW,), active=42,
+                       monitor=named)
+    d.monitors = lambda: ([named], Rect(0, 0, 3440, 1440))
+    assert main(["capture", "9"], deps=d) == 0
+    assert state["config"].dials["9"].monitor == "edid:AW3425DWM"
+
+
+def test_capture_refuses_when_the_identity_could_not_be_read():
+    # cli.py already refuses to guess when the window list is unreadable,
+    # because capture writes to config. Same rule, same reason.
+    unreadable = Monitor("HDMI-0", Rect(0, 0, 3440, 1440), primary=False,
+                         crtc=63, identity_reliable=False)
+    d, state, out = deps({"9": dial()}, windows=(_SPOTIFY_WINDOW,), active=42,
+                         monitor=unreadable)
+    d.monitors = lambda: ([unreadable], Rect(0, 0, 3440, 1440))
+    assert main(["capture", "9"], deps=d) == 1
+    assert state["upserts"] == 0
+    assert "identity" in out.getvalue().lower()
+
+
+def test_capture_reports_the_selector_it_wrote():
+    named = Monitor("HDMI-0", Rect(0, 0, 3440, 1440), primary=False, crtc=63,
+                    display_name="AW3425DWM")
+    d, _, out = deps({"9": dial()}, windows=(_SPOTIFY_WINDOW,), active=42,
+                     monitor=named)
+    d.monitors = lambda: ([named], Rect(0, 0, 3440, 1440))
+    main(["capture", "9"], deps=d)
+    assert "edid:AW3425DWM" in out.getvalue()

@@ -204,11 +204,25 @@ def _cmd_capture(args, d: Deps) -> int:
         return 1
     rect = d.window_geometry(chosen.wid) or Rect(0, 0, 800, 600)
     monitor = d.monitor_for(rect)
-    updated = replace(dial, monitor=monitor.name,
-                      rect=derive_rect(rect, monitor))
+    try:
+        mons, _root = d.monitors()
+    except Exception as exc:
+        print(f"could not read the monitor list from X: {exc}", file=d.out)
+        return 1
+    selector = monitors.selector_for(monitor, mons)
+    if selector is None:
+        # Same rule as the unreadable window list above: capture writes to the
+        # config, so guessing has a persistent cost. Writing a bare connector
+        # name here would silently swap a rename-proof selector for the exact
+        # fragile one this feature exists to retire.
+        print(f"could not read {monitor.name}'s identity from X; refusing to "
+              f"write a connector name that may not survive a reboot",
+              file=d.out)
+        return 1
+    updated = replace(dial, monitor=selector, rect=derive_rect(rect, monitor))
     d.upsert(config_path(), updated)
     d.signal_daemon()
-    print(f"captured {args.slot}: {monitor.name} "
+    print(f"captured {args.slot}: {selector} "
           f"{[round(v, 3) for v in updated.rect]}", file=d.out)
     return 0
 

@@ -304,11 +304,17 @@ class Daemon:
             mons = self.monitors.monitors()
             root = self.monitors.root_rect()
             monitor = _monitor_containing(win_rect, mons, root)
+            selector = monitors_mod.selector_for(monitor, mons)
+            if selector is None:
+                self._notify("Assign mode",
+                             f"could not read {monitor.name}'s identity; "
+                             "not binding")
+                return
             self.assign.arm(Capture(
                 wid=active,
                 wm_class=info.wm_class,
                 label=self.ops.window_name(active),
-                monitor=monitor.name,
+                monitor=selector,
                 rect=derive_rect(win_rect, monitor),
                 at=self._clock(),
             ))
