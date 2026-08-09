@@ -4,7 +4,7 @@
 
 **Goal:** Let a Dial name its target display by the display's own EDID name, so it lands on the intended screen even when X renames the connector between reboots.
 
-**Architecture:** `monitors.py` keeps its pure/IO split — new pure functions (`edid_name`, `parse_selector`, `is_internal`, `selector_for`) are unit-tested with no X server, and `MonitorSource` gains one property read per connected output. `pick()` grows selector dispatch with three outcomes (zero/one/many matches) in front of its existing, unchanged fallback chain. Both config-write paths route through one shared `selector_for`.
+**Architecture:** `monitors.py` keeps its pure/IO split — new pure functions (`edid_name`, `parse_selector`, `is_internal`, `selector_for`) are unit-tested with no X server, and `MonitorSource` gains one property read per connected output. `pick()` grows selector dispatch with three outcomes (zero/one/many matches) in front of its existing, unchanged fallback chain. All three config-write paths — `dials capture`, assign mode, and the curses TUI's `b` (bind) key in `dials/tui.py` — route through one shared `selector_for`.
 
 **Tech Stack:** Python 3.10, python-xlib (RandR 1.2), pytest, TOML via `tomli`.
 

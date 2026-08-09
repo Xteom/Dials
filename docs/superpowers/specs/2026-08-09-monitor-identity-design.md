@@ -227,11 +227,12 @@ A per-output failure sets `edid_failed=True` and never propagates, matching how
 
 ## Write path
 
-`dials capture` and assign mode both persist a monitor today, independently:
-`cli.py` via `Capture.monitor` (landing at `assign.py:141`), and
-`daemon.py:306` via `_monitor_containing`. Both write `monitor.name` — a bare
-connector — so using either would reintroduce this bug. They move to one shared
-pure helper:
+`dials capture`, assign mode, and the curses TUI's `b` (bind) key each persist
+a monitor today, independently: `cli.py` via `Capture.monitor` (landing at
+`assign.py:141`), `daemon.py:306` via `_monitor_containing`, and
+`dials/tui.py`'s bind handler via its own call into `_monitor_containing`. All
+three write `monitor.name` — a bare connector — so leaving any one of them
+unconverted would reintroduce this bug. They move to one shared pure helper:
 
 ```python
 selector_for(monitor, all_monitors) -> str | None
