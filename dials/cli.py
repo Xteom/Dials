@@ -264,6 +264,22 @@ def _cmd_reload(args, d: Deps) -> int:
     return 0 if ok else 1
 
 
+def _monitor_label(m) -> str:
+    """`HDMI-0 (AW3425DWM)` - the connector, plus what to actually type.
+
+    Discoverability is the point: an `edid:` selector is useless if the name it
+    needs can only be found with xrandr and a hex dump.
+    """
+    tags = []
+    if m.display_name:
+        tags.append(m.display_name)
+    if monitors.is_internal(m.name):
+        tags.append("internal")
+    if not m.identity_reliable:
+        tags.append("identity unreadable")
+    return f"{m.name} ({', '.join(tags)})" if tags else m.name
+
+
 def _cmd_status(args, d: Deps) -> int:
     try:
         cfg = d.load()
@@ -298,7 +314,7 @@ def _cmd_status(args, d: Deps) -> int:
         for _, reason in [monitors.pick(cfg.dials[slot].monitor, mons, root)]
         if reason
     ]
-    names = ", ".join(m.name for m in mons) or "none"
+    names = ", ".join(_monitor_label(m) for m in mons) or "none"
     print(f"monitors:  {names}", file=d.out)
     for slot, reason in warnings:
         print(f"monitor:   WARNING slot {slot}: {reason}", file=d.out)

@@ -362,3 +362,26 @@ def test_capture_reports_the_selector_it_wrote():
     d.monitors = lambda: ([named], Rect(0, 0, 3440, 1440))
     main(["capture", "9"], deps=d)
     assert "edid:AW3425DWM" in out.getvalue()
+
+
+def test_status_lists_display_names_so_they_need_not_be_guessed():
+    ultrawide = Monitor("HDMI-0", Rect(0, 0, 3440, 1440), primary=False,
+                        crtc=63, display_name="AW3425DWM")
+    panel = Monitor("eDP-1-1", Rect(388, 1440, 2560, 1440), primary=True,
+                    crtc=62)
+    d, _, out = deps({"9": dial()})
+    d.monitors = lambda: ([ultrawide, panel], Rect(0, 0, 3440, 2880))
+    main(["status"], deps=d)
+    line = next(ln for ln in out.getvalue().splitlines()
+                if ln.startswith("monitors:"))
+    assert "HDMI-0 (AW3425DWM)" in line
+    assert "eDP-1-1 (internal)" in line
+
+
+def test_status_marks_a_display_whose_identity_is_unreadable():
+    broken = Monitor("HDMI-0", Rect(0, 0, 3440, 1440), primary=True, crtc=63,
+                     identity_reliable=False)
+    d, _, out = deps({"9": dial()})
+    d.monitors = lambda: ([broken], Rect(0, 0, 3440, 1440))
+    main(["status"], deps=d)
+    assert "identity unreadable" in out.getvalue()
