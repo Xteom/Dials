@@ -261,3 +261,30 @@ def test_is_internal_matches_the_panel_under_both_boot_namings():
 def test_is_internal_rejects_external_connectors():
     for name in ("HDMI-0", "HDMI-1-0", "DP-1-1", "<root>"):
         assert not is_internal(name)
+
+
+def test_dedupe_populates_the_display_name_from_edid():
+    raw = RawOutput("HDMI-0", 63, 0, 0, 3440, 1440, False, edid=EDID_ULTRAWIDE)
+    assert dedupe_and_sort([raw])[0].display_name == "AW3425DWM"
+
+
+def test_dedupe_leaves_display_name_none_for_a_panel_without_one():
+    raw = RawOutput("eDP-1-1", 64, 0, 0, 2560, 1440, True, edid=EDID_PANEL)
+    assert dedupe_and_sort([raw])[0].display_name is None
+
+
+def test_a_failed_edid_read_is_not_the_same_as_no_edid():
+    # Both have display_name None; only one is an unreliable identity, and the
+    # write path refuses on that one.
+    absent = RawOutput("HDMI-0", 63, 0, 0, 3440, 1440, False, edid=None)
+    failed = RawOutput("HDMI-0", 63, 0, 0, 3440, 1440, False,
+                       edid=None, edid_failed=True)
+    assert dedupe_and_sort([absent])[0].identity_reliable is True
+    assert dedupe_and_sort([failed])[0].identity_reliable is False
+
+
+def test_existing_positional_rawoutput_construction_still_works():
+    # Tests across this suite build RawOutput positionally; the new fields must
+    # be appended with defaults, never inserted.
+    raw = RawOutput("HDMI-0", 63, 0, 0, 3440, 1440, False)
+    assert raw.edid is None and raw.edid_failed is False

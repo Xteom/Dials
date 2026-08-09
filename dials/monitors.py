@@ -30,6 +30,12 @@ class RawOutput:
     w: int
     h: int
     primary: bool
+    #: Raw EDID base block. New fields are APPENDED with defaults because this
+    #: is constructed positionally throughout the test suite.
+    edid: bytes | None = None
+    #: True only if the property read raised - never for a display that simply
+    #: has no EDID.
+    edid_failed: bool = False
 
 
 #: EDID descriptor tag for the model name. Descriptors live in the base block
@@ -138,6 +144,8 @@ def dedupe_and_sort(raws: list[RawOutput]) -> list[Monitor]:
             rect=Rect(r.x, r.y, r.w, r.h),
             primary=r.primary,
             crtc=r.crtc,
+            display_name=edid_name(r.edid),
+            identity_reliable=not r.edid_failed,
         )
         for r in by_crtc.values()
     ]
