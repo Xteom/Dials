@@ -32,6 +32,37 @@ class RawOutput:
     primary: bool
 
 
+#: EDID descriptor tag for the model name. Descriptors live in the base block
+#: at bytes 54, 72, 90, 108 - four 18-byte slots, each tagged by byte 3.
+_EDID_NAME_TAG = 0xFC
+_EDID_HEADER = b"\x00\xff\xff\xff\xff\xff\xff\x00"
+
+
+def edid_name(blob: bytes | None) -> str | None:
+    """The display's own model name from its EDID, or None.
+
+    None covers three different things on purpose - a malformed blob, a blob
+    that is not EDID at all, and a display that simply carries no 0xFC
+    descriptor. Laptop panels are the third case: a panel is not sold as its
+    own product, so it has no model name to report. Callers distinguish "no
+    name" from "could not read" via RawOutput.edid_failed, not via this.
+
+    Never raises. A display with an unparseable EDID is a display without a
+    name, not a crashed daemon.
+    """
+    if not blob:
+        return None
+    b = bytes(blob)
+    if len(b) < 128 or b[:8] != _EDID_HEADER:
+        return None
+    for i in range(54, 126, 18):
+        d = b[i:i + 18]
+        if d[0:3] == b"\x00\x00\x00" and d[3] == _EDID_NAME_TAG:
+            text = d[5:18].split(b"\n")[0]
+            return text.decode("ascii", "replace").strip() or None
+    return None
+
+
 def dedupe_and_sort(raws: list[RawOutput]) -> list[Monitor]:
     """Drop disconnected outputs, collapse mirrored ones, order deterministically.
 

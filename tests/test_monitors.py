@@ -1,5 +1,7 @@
 from dials.geometry import Monitor, Rect
-from dials.monitors import MonitorSource, RawOutput, dedupe_and_sort, pick
+from dials.monitors import (
+    MonitorSource, RawOutput, dedupe_and_sort, edid_name, pick,
+)
 
 ROOT = Rect(0, 0, 3440, 2880)
 
@@ -163,3 +165,44 @@ def test_a_raising_reader_with_no_cache_yields_no_monitors():
     src = _source(boom)
     assert src.monitors() == []
     # pick() then degrades to the root box, which is its documented last resort.
+
+
+# Real EDID base blocks captured from this machine on 2026-08-09.
+# HDMI-0 is the Dell/Alienware ultrawide; it carries a 0xFC monitor name.
+EDID_ULTRAWIDE = bytes.fromhex(
+    "00ffffffffffff0010ac85d156374d310423010380502178ead5c5ac5044a225"
+    "0f5054a54b00714f8140818081c081009500b300d1c0e77c70a0d0a029503020"
+    "3a001d4e3100001a000000ff0031534b433434340a2020202020000000fc0041"
+    "573334323544574d0a202020000000fd0830b41d1e6e000a2020202020200106"
+)
+# eDP-1-1 is the built-in BOE panel; it carries NO 0xFC descriptor, which is
+# why `internal` exists as a separate selector.
+EDID_PANEL = bytes.fromhex(
+    "00ffffffffffff0009e5f90900000000041f0104a5261578030f95ae5243b026"
+    "0f505400000001010101010101010101010101010101e26700b0a0a0b4503020"
+    "36007dd610000018000000fd0c30f086866a010a202020202020000000fe0042"
+    "4f452043510a202020202020000000fe004e4531373351484d2d4e5a310a01f6"
+)
+
+
+def test_edid_name_reads_the_real_ultrawide_blob():
+    assert edid_name(EDID_ULTRAWIDE) == "AW3425DWM"
+
+
+def test_edid_name_is_none_for_a_panel_with_no_name_descriptor():
+    # Not a parse failure - laptop panels are not sold as products and simply
+    # do not carry 0xFC. This is the case `internal` exists to cover.
+    assert edid_name(EDID_PANEL) is None
+
+
+def test_edid_name_rejects_a_blob_with_a_bad_header():
+    assert edid_name(b"\x01" * 128) is None
+
+
+def test_edid_name_rejects_a_truncated_blob():
+    assert edid_name(EDID_ULTRAWIDE[:64]) is None
+
+
+def test_edid_name_handles_none_and_empty():
+    assert edid_name(None) is None
+    assert edid_name(b"") is None
