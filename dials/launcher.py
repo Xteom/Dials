@@ -36,6 +36,32 @@ class PendingLaunch:
     launched_at: float | None = None
 
 
+def derive_launch(match_class: str, pid: int | None = None,
+                  search_dirs=None, proc_root: str = "/proc") -> str | None:
+    """Best guess at the command that starts this window's app, or None.
+
+    Every bound Dial should be able to launch its app, so binding fills this
+    in instead of leaving it empty. The .desktop entry wins because it is the
+    command the app menu runs; the owning process's argv is the fallback for
+    apps without one (a custom-class Firefox profile, a script).
+    """
+    from dials.icons import desktop_exec
+
+    cmd = desktop_exec(match_class, search_dirs)
+    if cmd:
+        return cmd
+    if pid:
+        try:
+            with open(f"{proc_root}/{pid}/cmdline", "rb") as f:
+                argv = [a.decode("utf-8", "replace")
+                        for a in f.read().split(b"\0") if a]
+        except OSError:
+            argv = []
+        if argv:
+            return shlex.join(argv)
+    return None
+
+
 def expand(token: str) -> str:
     """Expand `~` and `$VARS` in one argv token.
 

@@ -292,3 +292,24 @@ def test_the_spawned_argv_is_expanded(monkeypatch, tmp_path):
     assert "~" not in " ".join(seen["argv"])
     assert seen["argv"][0] == "firefox"
     assert seen["argv"][-1] == "--class=Dial6"
+
+
+def test_derive_launch_prefers_the_desktop_entry(tmp_path):
+    from dials.launcher import derive_launch
+    (tmp_path / "app.desktop").write_text(
+        "[Desktop Entry]\nName=App\nExec=app %U\n"
+    )
+    assert derive_launch("app", pid=1, search_dirs=[tmp_path]) == "app"
+
+
+def test_derive_launch_falls_back_to_the_process_argv(tmp_path):
+    from dials.launcher import derive_launch
+    (tmp_path / "42").mkdir()
+    (tmp_path / "42" / "cmdline").write_bytes(b"firefox\0--class=My App\0")
+    assert derive_launch("nomatch", pid=42, search_dirs=[tmp_path],
+                         proc_root=str(tmp_path)) == "firefox '--class=My App'"
+
+
+def test_derive_launch_is_none_when_nothing_is_known(tmp_path):
+    from dials.launcher import derive_launch
+    assert derive_launch("nomatch", pid=None, search_dirs=[tmp_path]) is None

@@ -248,6 +248,10 @@ class WindowOps:
             log.debug("failed to read geometry for window %#x", wid, exc_info=True)
             return None
 
+    def window_pid(self, wid: int) -> int | None:
+        vals = self._prop(wid, "_NET_WM_PID")
+        return vals[0] if vals else None
+
     def window_name(self, wid: int) -> str:
         raw = self._prop(wid, "_NET_WM_NAME")
         if raw:

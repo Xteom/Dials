@@ -110,6 +110,8 @@ on_focus_loss = "normal"
 [dials."8"]
 label         = "ChatGPT"
 match_class   = "Chatgpt"
+# From /usr/share/applications/chatgpt.desktop (Exec=chatgpt %U).
+launch        = "chatgpt"
 icon          = ""
 monitor       = "edid:AW3425DWM"
 rect          = [0.5, 0.0, 0.5, 1.0]

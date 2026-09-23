@@ -64,6 +64,7 @@ def move(grid, slot: str, dx: int, dy: int) -> str:
 
 def resolve_bind(
     cursor: str, cfg: Config, wm_class: str, label: str, rect, mons, root,
+    launch: str | None = None,
 ) -> tuple[Dial | None, str]:
     """Turn a picked window into a Dial to persist, or a refusal.
 
@@ -91,7 +92,7 @@ def resolve_bind(
             f"{cursor} - a connector name may not survive a reboot"
         )
     dial = Dial(
-        slot=cursor, label=label, match_class=wm_class, launch=None, icon="",
+        slot=cursor, label=label, match_class=wm_class, launch=launch, icon="",
         monitor=selector, rect=derive_rect(rect, monitor),
         on_focus_loss=cfg.defaults.on_focus_loss,
         pin_geometry=cfg.defaults.pin_geometry,
@@ -123,6 +124,7 @@ def run(config: Config) -> int:
     from dials.cli import _signal_daemon
     from dials.config import config_path
     from dials.configwrite import remove_dial, upsert_dial
+    from dials.launcher import derive_launch
 
     # Every other writer signals the daemon after a write (cli unbind/capture,
     # the confirm dialog, and the daemon's own in-process _persist). Without it
@@ -232,6 +234,8 @@ def run(config: Config) -> int:
                         cursor, cfg, info.wm_class,
                         ops.window_name(info.wid) or info.wm_class,
                         rect, src.monitors(), src.root_rect(),
+                        launch=derive_launch(info.wm_class,
+                                             ops.window_pid(info.wid)),
                     )
                     if dial is not None:
                         cfg = upsert_dial(config_path(), dial)

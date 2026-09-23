@@ -27,7 +27,7 @@ from dials import geometry, keys, monitors as monitors_mod, panels
 from dials.assign import AssignMode, Capture, OverwriteRequest, derive_rect
 from dials.config import Config, config_path, load, state_dir
 from dials.grab import Debouncer, GrabManager
-from dials.launcher import LaunchCoordinator
+from dials.launcher import LaunchCoordinator, derive_launch
 from dials.panels import FocusTracker
 from dials.windows import WindowOps, choose, group_ids
 
@@ -317,6 +317,7 @@ class Daemon:
                 monitor=selector,
                 rect=derive_rect(win_rect, monitor),
                 at=self._clock(),
+                launch=derive_launch(info.wm_class, self.ops.window_pid(active)),
             ))
         except Exception as exc:
             self._notify("Assign mode failed", str(exc))

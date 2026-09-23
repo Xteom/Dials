@@ -39,6 +39,7 @@ class Capture:
     monitor: str
     rect: tuple[float, float, float, float]
     at: float
+    launch: str | None = None
 
 
 @dataclass(frozen=True)
@@ -136,7 +137,7 @@ class AssignMode:
             slot=slot,
             label=(cap.label.strip() or cap.wm_class),
             match_class=cap.wm_class,
-            launch=None,
+            launch=cap.launch,
             icon="",
             monitor=cap.monitor,
             rect=cap.rect,

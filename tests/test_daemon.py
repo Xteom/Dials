@@ -49,6 +49,9 @@ class FakeOps:
     def window_name(self, wid):
         return "A Window"
 
+    def window_pid(self, wid):
+        return None
+
     def apply_geometry(self, wid, rect):
         self.calls.append(("geometry", wid, rect))
 

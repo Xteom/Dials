@@ -89,3 +89,13 @@ def test_desktop_icon_name_survives_a_missing_directory():
 def test_desktop_icon_name_survives_a_malformed_file(tmp_path):
     (tmp_path / "broken.desktop").write_bytes(b"\xff\xfe not ini at all")
     assert desktop_icon_name("broken", search_dirs=[tmp_path]) == ""
+
+
+def test_desktop_exec_drops_field_codes_and_flatpak_markers(tmp_path):
+    from dials.icons import desktop_exec
+    (tmp_path / "app.desktop").write_text(
+        "[Desktop Entry]\nName=App\nStartupWMClass=App\n"
+        "Exec=/usr/bin/flatpak run --file-forwarding org.App @@u %U @@\n"
+    )
+    assert desktop_exec("App", search_dirs=[tmp_path]) == \
+        "/usr/bin/flatpak run --file-forwarding org.App"

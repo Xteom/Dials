@@ -10,6 +10,8 @@ Resolution order: explicit per-Dial `icon`, then the class name, then the
 from __future__ import annotations
 
 import configparser
+import re
+import shlex
 from pathlib import Path
 
 DEFAULT_GLYPH = ""          # generic window
@@ -38,7 +40,12 @@ _DEFAULT_DIRS = (
     Path.home() / ".local/share/applications",
     Path("/usr/share/applications"),
     Path("/var/lib/snapd/desktop/applications"),
+    Path.home() / ".local/share/flatpak/exports/share/applications",
+    Path("/var/lib/flatpak/exports/share/applications"),
 )
+
+#: Desktop Entry Exec field codes, plus the markers Flatpak wraps them in.
+_EXEC_PLACEHOLDERS = re.compile(r"^(%[fFuUdDnNickvm]|@@[uf]?)$")
 
 
 def _normalise(name: str) -> str:
@@ -61,11 +68,11 @@ def glyph_for(match_class: str, icon_override: str = "",
     return DEFAULT_GLYPH
 
 
-def desktop_icon_name(match_class: str, search_dirs=None) -> str:
-    """Read `Icon=` from the .desktop entry matching this window class.
+def _desktop_value(match_class: str, key: str, search_dirs=None) -> str:
+    """Read `key` from the .desktop entry matching this window class.
 
-    Prefers a StartupWMClass match, which is how Snap-packaged apps like
-    Spotify advertise their class. Best-effort: unreadable files are skipped.
+    Prefers a StartupWMClass match, which is how Snap- and Flatpak-packaged
+    apps advertise their class. Best-effort: unreadable files are skipped.
     """
     dirs = [Path(d) for d in (search_dirs or _DEFAULT_DIRS)]
     target = _normalise(match_class)
@@ -82,11 +89,32 @@ def desktop_icon_name(match_class: str, search_dirs=None) -> str:
                 section = parser["Desktop Entry"]
             except Exception:
                 continue
-            icon = section.get("Icon", "").strip()
-            if not icon:
+            value = section.get(key, "").strip()
+            if not value:
                 continue
             if _normalise(section.get("StartupWMClass", "")) == target:
-                return icon
+                return value
             if _normalise(path.stem) == target and not fallback:
-                fallback = icon
+                fallback = value
     return fallback
+
+
+def desktop_icon_name(match_class: str, search_dirs=None) -> str:
+    """Read `Icon=` from the .desktop entry matching this window class."""
+    return _desktop_value(match_class, "Icon", search_dirs)
+
+
+def desktop_exec(match_class: str, search_dirs=None) -> str:
+    """The matching .desktop entry's `Exec=`, runnable with no arguments.
+
+    Field codes (%U, %f, ...) and Flatpak's @@u/@@ markers are dropped: a
+    Dial launches the app bare, never with files or URLs.
+    """
+    raw = _desktop_value(match_class, "Exec", search_dirs)
+    try:
+        tokens = shlex.split(raw)
+    except ValueError:
+        return ""
+    kept = [t.replace("%%", "%") for t in tokens
+            if not _EXEC_PLACEHOLDERS.match(t)]
+    return shlex.join(kept) if kept else ""
