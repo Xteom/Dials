@@ -33,7 +33,7 @@ class ConfigError(ValueError):
 class Defaults:
     monitor: str = "HDMI-0"
     rect: tuple[float, float, float, float] = (0.0, 0.0, 0.5, 1.0)
-    on_focus_loss: str = "hide"
+    on_focus_loss: str = "normal"
     pin_geometry: bool = False
 
 

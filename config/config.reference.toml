@@ -27,7 +27,9 @@ monitor       = "edid:AW3425DWM"
 # x, y, w, h as fractions of the monitor rect
 rect          = [0.0, 0.0, 0.5, 1.0]
 # normal = can be buried | above = never buried | hide = hides on focus loss
-on_focus_loss = "hide"
+# "normal" by default: clicking away from a Dial must not put it away. Opt a
+# single Dial into "hide" if you want dropdown-style auto-dismiss.
+on_focus_loss = "normal"
 # Re-apply geometry on every raise, not just on show.
 #
 # ON, deliberately. Geometry is applied unconditionally on SHOW - i.e. when a
@@ -101,4 +103,14 @@ monitor       = "edid:AW3425DWM"
 rect          = [0.7, 0.0, 0.3, 1.0]
 # "normal": stays put when focus moves elsewhere AND can be buried. It was
 # "above", which is what kept it permanently on top of everything.
+on_focus_loss = "normal"
+
+
+# RIGHT half of the ultrawide, sharing the Spotify/Slack region.
+[dials."8"]
+label         = "ChatGPT"
+match_class   = "Chatgpt"
+icon          = ""
+monitor       = "edid:AW3425DWM"
+rect          = [0.5, 0.0, 0.5, 1.0]
 on_focus_loss = "normal"

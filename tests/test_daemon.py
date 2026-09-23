@@ -567,7 +567,7 @@ def test_reload_rebuilds_assign_mode_with_the_new_defaults():
     """
     ops = FakeOps(windows=[win(5)], active=5)
     d = daemon(ops)
-    assert CONFIG.defaults.on_focus_loss == "hide"      # the stale value
+    assert CONFIG.defaults.on_focus_loss == "normal"    # the stale value
 
     d.reload(loads("""
 [defaults]
