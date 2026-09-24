@@ -257,3 +257,10 @@ def test_unknown_monitor_prefix_is_a_config_error_on_a_dial():
 def test_empty_edid_selector_is_a_config_error():
     with pytest.raises(ConfigError, match="empty name"):
         loads('[defaults]\nmonitor = "edid:"\n')
+
+
+def test_in_alt_tab_defaults_off_and_must_be_a_bool():
+    assert loads('[dials."9"]\nmatch_class="x"\n').dial("9").in_alt_tab is False
+    assert loads('[dials."9"]\nmatch_class="x"\nin_alt_tab=true\n').dial("9").in_alt_tab
+    with pytest.raises(ConfigError, match="in_alt_tab"):
+        loads('[dials."9"]\nmatch_class="x"\nin_alt_tab="yes"\n')

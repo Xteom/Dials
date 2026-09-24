@@ -163,3 +163,9 @@ def test_importing_the_daemon_pulls_in_none_of_the_forbidden_modules():
     assert result.returncode == 0, result.stderr
     leaked = json.loads(result.stdout.strip())
     assert leaked == [], f"dials.daemon imported {leaked}"
+
+
+def test_in_alt_tab_survives_a_write(tmp_config_path):
+    from dataclasses import replace
+    upsert_dial(tmp_config_path, replace(_dial(), in_alt_tab=True))
+    assert load(tmp_config_path).dial("4").in_alt_tab is True

@@ -113,6 +113,7 @@ def detail_lines(dial: Dial | None) -> list[str]:
         f"{w * 100:.0f}% x {h * 100:.0f}%",
         f"on_focus_loss  {dial.on_focus_loss}",
         f"pin_geometry   {'yes' if dial.pin_geometry else 'no'}",
+        f"in_alt_tab     {'yes' if dial.in_alt_tab else 'no'}",
     ]
 
 

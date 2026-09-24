@@ -91,10 +91,12 @@ from dials.geometry import Rect
 
 log = logging.getLogger(__name__)
 
-#: Applied to every Dial unconditionally. SKIP_TASKBAR because mutter reads that
-#: same flag to exclude a window from alt-tab (see META_WINDOW_IN_NORMAL_TAB_CHAIN
-#: in mutter/src/core/window-private.h). Losing the taskbar entry is the accepted
-#: cost of the alt-tab requirement.
+#: Applied to every Dial unless it sets `in_alt_tab`, in which case they are
+#: actively removed. SKIP_TASKBAR because mutter reads that same flag to exclude
+#: a window from alt-tab (see META_WINDOW_IN_NORMAL_TAB_CHAIN in
+#: mutter/src/core/window-private.h). Losing the taskbar entry is the accepted
+#: cost of the alt-tab requirement - and, the other way round, an `in_alt_tab`
+#: Dial gets its dock and overview entries back too.
 #:
 #: _NET_WM_STATE_STICKY is NOT here, and is actively removed - see `apply_hints`
 #: and `place_on_current_desktop`.
@@ -319,7 +321,7 @@ class WindowOps:
              rect.x, rect.y, rect.w, rect.h],
         )
 
-    def apply_hints(self, wid: int, above: bool) -> None:
+    def apply_hints(self, wid: int, above: bool, in_alt_tab: bool = False) -> None:
         """Make `wid` behave as a panel, and set or clear its always-on-top state.
 
         ABOVE is explicitly REMOVED when `above` is false, rather than merely not
@@ -334,11 +336,15 @@ class WindowOps:
         a window that was made sticky by an earlier version of this code stays
         sticky forever otherwise - it is not enough to stop adding it. See
         `place_on_current_desktop` for what replaces it.
+
+        `in_alt_tab` REMOVES the panel hints for the same add/remove reason: the
+        window almost certainly had them added on an earlier show.
         """
         for name in PANEL_HINTS:
             self._client_message(
                 wid, "_NET_WM_STATE",
-                [_STATE_ADD, self._atom(name), 0, _SOURCE_PAGER, 0],
+                [_STATE_REMOVE if in_alt_tab else _STATE_ADD,
+                 self._atom(name), 0, _SOURCE_PAGER, 0],
             )
         for name, on in (("_NET_WM_STATE_ABOVE", above),
                          ("_NET_WM_STATE_STICKY", False)):

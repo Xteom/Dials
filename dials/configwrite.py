@@ -50,6 +50,8 @@ def to_toml(config: Config) -> str:
         }
         if d.launch:
             body["launch"] = d.launch
+        if d.in_alt_tab:
+            body["in_alt_tab"] = True
         dials[slot] = body
     if dials:
         doc["dials"] = dials

@@ -193,7 +193,8 @@ class Daemon:
                 self.ops.apply_geometry(chosen.wid, self._rect_for(dial))
             if panels.reapply_hints(action):
                 self.ops.apply_hints(chosen.wid,
-                                     above=(dial.on_focus_loss == "above"))
+                                     above=(dial.on_focus_loss == "above"),
+                                     in_alt_tab=dial.in_alt_tab)
                 # Bring the window to THIS workspace rather than making it sticky.
                 # Sticky would satisfy "reachable from any workspace" by putting
                 # the Dial on every workspace, so switching workspace dragged all
@@ -414,7 +415,8 @@ class Daemon:
         try:
             self.ops.apply_geometry(chosen.wid, self._rect_for(dial))
             self.ops.apply_hints(chosen.wid,
-                                 above=(dial.on_focus_loss == "above"))
+                                 above=(dial.on_focus_loss == "above"),
+                                 in_alt_tab=dial.in_alt_tab)
             self.ops.place_on_current_desktop(chosen.wid)
             self._tracker(dial).activating(chosen.wid)
             self.ops.activate(chosen.wid, self._confirm_timestamp)

@@ -443,3 +443,11 @@ def test_list_windows_prunes_first_seen_for_windows_that_left_the_client_list():
     o.list_windows()
     assert WID not in o._first_seen, \
         "a window that left _NET_CLIENT_LIST must be pruned"
+
+
+def test_apply_hints_removes_the_panel_hints_for_an_in_alt_tab_dial():
+    """REMOVE, not just skip: the window had them added on an earlier show."""
+    o, d = ops()
+    o.apply_hints(0x500001, above=False, in_alt_tab=True)
+    for name in PANEL_HINTS:
+        assert _action_for(d, name) == 0              # 0 = _NET_WM_STATE_REMOVE

@@ -116,3 +116,6 @@ icon          = ""
 monitor       = "edid:AW3425DWM"
 rect          = [0.5, 0.0, 0.5, 1.0]
 on_focus_loss = "normal"
+# Unlike the other Dials, reachable from alt-tab. The same flag also brings
+# back its dock and overview entries - GNOME cannot split them.
+in_alt_tab    = true

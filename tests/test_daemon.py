@@ -55,8 +55,10 @@ class FakeOps:
     def apply_geometry(self, wid, rect):
         self.calls.append(("geometry", wid, rect))
 
-    def apply_hints(self, wid, above):
+    def apply_hints(self, wid, above, in_alt_tab=False):
         self.calls.append(("hints", wid, above))
+        if in_alt_tab:
+            self.calls.append(("in_alt_tab", wid))
 
     def place_on_current_desktop(self, wid):
         self.calls.append(("desktop", wid))
@@ -1290,3 +1292,10 @@ def test_tick_expires_an_armed_assign_capture():
     d.tick()
     assert d.assign.armed is False
     assert d.select_timeout() is None
+
+
+def test_an_in_alt_tab_dial_passes_it_to_apply_hints():
+    cfg = loads('[dials."9"]\nmatch_class="spotify"\nin_alt_tab=true\n')
+    ops = FakeOps(windows=[win(5)], active=999)
+    daemon(ops, config=cfg).handle_slot("9", timestamp=1)
+    assert ("in_alt_tab", 5) in ops.calls

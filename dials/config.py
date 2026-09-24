@@ -48,6 +48,9 @@ class Dial:
     rect: tuple[float, float, float, float]
     on_focus_loss: str
     pin_geometry: bool
+    #: Keep the window in alt-tab (and so the dock and overview), instead of
+    #: hiding it there like every other Dial. Per-Dial only.
+    in_alt_tab: bool = False
 
 
 @dataclass(frozen=True)
@@ -221,6 +224,7 @@ def _dial(slot: str, raw: dict, defaults: Defaults) -> Dial:
         pin_geometry=_bool(
             raw.get("pin_geometry", defaults.pin_geometry), "pin_geometry", where
         ),
+        in_alt_tab=_bool(raw.get("in_alt_tab", False), "in_alt_tab", where),
     )
 
 
