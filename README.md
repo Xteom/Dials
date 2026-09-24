@@ -238,6 +238,10 @@ unconfirmed** — read that before concluding something is broken.
 
 ## If Dials show up in alt-tab or the workspace overview
 
+Hidden there on purpose. To keep ONE Dial in alt-tab, set `in_alt_tab = true`
+on it (dial 8, ChatGPT, does). That also brings back its dock and overview
+entries: GNOME uses the same flag for all three.
+
 `_NET_WM_STATE_SKIP_TASKBAR` is necessary but **not sufficient** on Pop!_OS. GNOME
 Shell honours it in both places, but `pop-shell` monkey-patches the overview and the
 switcher so minimise-to-tray applications stay reachable — and its test matches
